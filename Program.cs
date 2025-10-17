@@ -1,46 +1,50 @@
-using Microsoft.AspNetCore.Authentication.JwtBearer;
+﻿using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
-using System.Diagnostics;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using System.Text.RegularExpressions;
 using YTdownloadBackend.Data;
 using YTdownloadBackend.Models;
+using YTdownloadBackend.Services;
 
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services
-builder.Services.AddOpenApi();        // Minimal API OpenAPI
-builder.Services.AddSwaggerGen();     // Swagger UI
+
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();    
 builder.Services.AddAuthorization();
 builder.Services.AddHttpClient<IYouTubeService, YouTubeService>();
+builder.Services.AddScoped<IYtDlpService, YtDlpService>();
+builder.Services.AddScoped<PlaylistScannerService>();
 
 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(
         builder.Configuration.GetConnectionString("DefaultConnection")));
 
-var jwtSecretKey = "724619304f63dc196741ba61c3bed39cb96ed83e83858685264416d7824ddc87ee94e17d"; // at least 16 characters
+var jwtSecretKey = Environment.GetEnvironmentVariable("JWT_SECRET_KEY")
+                  ?? builder.Configuration["Jwt:Secret"]
+                  ?? throw new InvalidOperationException("JWT secret key not configured.");
+
 
 builder.Services.AddAuthentication(options =>
 {
     options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
     options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
-})
-.AddJwtBearer(options =>
-{
-    options.TokenValidationParameters = new TokenValidationParameters
+}).AddJwtBearer(options =>
     {
-        ValidateIssuer = false,              // we are not validating issuer yet
-        ValidateAudience = false,            // we are not validating audience yet
-        ValidateLifetime = true,             // token must not be expired
-        ValidateIssuerSigningKey = true,     // must validate signature
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecretKey))
-    };
-});
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = false,              // we are not validating issuer yet
+            ValidateAudience = false,            // we are not validating audience yet
+            ValidateLifetime = true,             // token must not be expired
+            ValidateIssuerSigningKey = true,     // must validate signature
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecretKey))
+        };
+    });
 
 var app = builder.Build();
 app.UseAuthentication();
@@ -50,36 +54,25 @@ app.UseAuthorization();
 // Only in Development environment
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();     // Minimal API docs
     app.UseSwagger();     // Enable /swagger
     app.UseSwaggerUI();   // Enable UI
 }
 
 app.UseHttpsRedirection();
 
-// Your existing endpoint
-var summaries = new[]
+app.MapGet("/helthCheck", () =>
 {
-    "Freezing","Bracing","Chilly","Cool","Mild","Warm","Balmy","Hot","Sweltering","Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast = Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast(
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        )
-    ).ToArray();
-    return forecast;
+    return Results.Ok(new
+    {
+        message = "Authinticad",
+    });
 })
 .RequireAuthorization()
-.WithName("GetWeatherForecast");
+.WithName("helthCheck");
 
 
 
-app.MapPost("/savePlaylist", async ( PlaylistRequest request, AppDbContext db, HttpContext http) =>
+app.MapPost("/savePlaylist", async ( PlaylistRequest request, AppDbContext db, HttpContext http, IYouTubeService ytService) =>
 {
     //  Get the logged-in user name from JWT
     var username = http.User.Identity?.Name;
@@ -93,6 +86,10 @@ app.MapPost("/savePlaylist", async ( PlaylistRequest request, AppDbContext db, H
         return Results.Unauthorized();
     }
 
+
+    // Check if user already has a playlist
+    var existing = await db.Playlists.FirstOrDefaultAsync(p => p.UserId == user.Id);
+
     //  Extract playlist ID from URL using regex
     var match = Regex.Match(request.PlaylistUrl, @"[?&]list=([^&]+)");
     if (!match.Success)
@@ -101,18 +98,48 @@ app.MapPost("/savePlaylist", async ( PlaylistRequest request, AppDbContext db, H
     string playlistId = match.Groups[1].Value;
 
 
-    var playlistName = !string.IsNullOrWhiteSpace(request.CustomName)
+
+    var playlistTitle = !string.IsNullOrWhiteSpace(request.CustomName)
        ? request.CustomName
        : await ytService.GetPlaylistTitleAsync(playlistId)
            ?? $"Playlist_{DateTime.UtcNow:yyyyMMddHHmmss}";
 
+    if (existing != null)
+    {
+        if (existing.PlaylistId == playlistId)
+        {
+            return Results.Ok(new
+            {
+                message = $"✅ You already have this playlist saved: {playlistTitle}"
+            });
+        }
+        else
+        {
+            // Overwrite existing playlist
+            db.Playlists.Remove(existing);
+
+            db.Playlists.Add(new Playlist
+            {
+                PlaylistId = playlistId,
+                PlaylistTitle = playlistTitle,
+                UserId = user.Id
+            });
+
+            await db.SaveChangesAsync();
+
+            return Results.Ok(new
+            {
+                message = $"♻️ Existing playlist replaced with: {playlistTitle}"
+            });
+        }
+    }
 
     //  Save playlist to database
     var playlist = new Playlist
     {
         User = user,
         PlaylistId = playlistId,
-        PlaylistName = request.CustomName ?? $"Playlist_{DateTime.UtcNow:yyyyMMddHHmmss}",
+        PlaylistTitle = playlistTitle,
     };
 
     db.Playlists.Add(playlist);
@@ -152,50 +179,22 @@ app.MapGet("/playlists", async (AppDbContext db, HttpContext http) =>
 .RequireAuthorization()
 .WithOpenApi();
 
-
-
-
-app.MapPost("/download/{videoId}", async (string videoId) =>
+app.MapPost("/scan/{playlistId}", async (HttpContext http, string playlistId, PlaylistScannerService scanner) =>
 {
-    string ytDlpFileName = "yt-dlp";
-    if (OperatingSystem.IsWindows()) ytDlpFileName += ".exe";
-
-    string ytDlpPath = Path.Combine(Directory.GetCurrentDirectory(), "yt-dlp", ytDlpFileName);
-    if (!File.Exists(ytDlpPath))
-        return Results.Problem($"yt-dlp executable not found at {ytDlpPath}");
-
-    string downloadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "downloads");
-    Directory.CreateDirectory(downloadsFolder);
-
-    // Template: <title>.mp3
-    string outputTemplate = Path.Combine(downloadsFolder, "%(title)s.%(ext)s");
-
-    var psi = new ProcessStartInfo
+    var username = http.User.Identity?.Name;
+    if (username is null)
     {
-        FileName = ytDlpPath,
-        Arguments = $"--extract-audio --audio-format mp3 -o \"{outputTemplate}\" https://www.youtube.com/watch?v={videoId}",
-        RedirectStandardOutput = true,
-        RedirectStandardError = true,
-        UseShellExecute = false,
-        CreateNoWindow = true
-    };
-
-    var process = Process.Start(psi);
-    if (process == null) return Results.Problem("Failed to start yt-dlp");
-
-    string stdOut = await process.StandardOutput.ReadToEndAsync();
-    string stdErr = await process.StandardError.ReadToEndAsync();
-    await process.WaitForExitAsync();
-
-    return Results.Ok(new
-    {
-        VideoId = videoId,
-        ExitCode = process.ExitCode,
-        StdOut = stdOut,
-        StdErr = stdErr
-    });
+        return Results.Unauthorized();
+    }
+    await scanner.ScanForNewAsync(playlistId, username);
+    return Results.Ok("Scan completed.");
 })
 .RequireAuthorization();
+
+
+
+
+
 
 
 app.MapPost("/signup", async (AppDbContext db, SignupRequest request) =>
@@ -264,12 +263,13 @@ app.MapPost("/login", async (AppDbContext db, LoginRequest request) =>
 
     return Results.Ok(new { token = jwtToken });
 })
-.WithName("Login")
+.WithName("auth/Login")
 .WithOpenApi(); // appear in Swagger
 
 
 
 app.Run();
+public partial class Program { }
 
 record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
 {

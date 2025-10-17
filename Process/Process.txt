@@ -1,0 +1,3 @@
+1. Make a System enviroment variable named 'YOUTUBE_API_KEY' and kep YTDataApi key hear
+
+2. Make a System enviroment variable named 'JWT_SECRET_KEY' and kep your secret key hear

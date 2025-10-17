@@ -1,0 +1,64 @@
+[11-10-2025 23:45:16] 4VX1P_X5ZvA
+[youtube] Extracting URL: https://www.youtube.com/watch?v=4VX1P_X5ZvA
+[youtube] 4VX1P_X5ZvA: Downloading webpage
+[youtube] 4VX1P_X5ZvA: Downloading tv simply player API JSON
+[youtube] 4VX1P_X5ZvA: Downloading tv client config
+[youtube] 4VX1P_X5ZvA: Downloading tv player API JSON
+[info] 4VX1P_X5ZvA: Downloading 1 format(s): 251
+[download] Sleeping 4.00 seconds as required by the site...
+
+ERROR: unable to download video data: HTTP Error 403: Forbidden
+
+
+[11-10-2025 23:45:35] CaVwavIdeRw
+[youtube] Extracting URL: https://www.youtube.com/watch?v=CaVwavIdeRw
+[youtube] CaVwavIdeRw: Downloading webpage
+[youtube] CaVwavIdeRw: Downloading tv simply player API JSON
+[youtube] CaVwavIdeRw: Downloading tv client config
+[youtube] CaVwavIdeRw: Downloading tv player API JSON
+[info] CaVwavIdeRw: Downloading 1 format(s): 251
+[download] Sleeping 4.00 seconds as required by the site...
+
+ERROR: unable to download video data: HTTP Error 403: Forbidden
+
+
+[11-10-2025 23:45:46] 859u6uiZdds
+[youtube] Extracting URL: https://www.youtube.com/watch?v=859u6uiZdds
+[youtube] 859u6uiZdds: Downloading webpage
+[youtube] 859u6uiZdds: Downloading tv simply player API JSON
+[youtube] 859u6uiZdds: Downloading tv client config
+[youtube] 859u6uiZdds: Downloading tv player API JSON
+[info] 859u6uiZdds: Downloading 1 format(s): 251
+[download] Sleeping 4.00 seconds as required by the site...
+
+ERROR: unable to download video data: HTTP Error 403: Forbidden
+
+
+[11-10-2025 23:54:23] Pf8QguZPnxI
+[youtube] Extracting URL: https://www.youtube.com/watch?v=Pf8QguZPnxI
+[youtube] Pf8QguZPnxI: Downloading webpage
+[youtube] Pf8QguZPnxI: Downloading tv simply player API JSON
+[youtube] Pf8QguZPnxI: Downloading tv client config
+[youtube] Pf8QguZPnxI: Downloading tv player API JSON
+[info] Pf8QguZPnxI: Downloading 1 format(s): 251
+[download] Sleeping 5.00 seconds as required by the site...
+
+ERROR: unable to download video data: HTTP Error 403: Forbidden
+
+
+[12-10-2025 00:06:23] Pf8QguZPnxI
+[youtube] Extracting URL: https://www.youtube.com/watch?v=Pf8QguZPnxI
+[youtube] Pf8QguZPnxI: Downloading webpage
+[youtube] Pf8QguZPnxI: Downloading tv client config
+[youtube] Pf8QguZPnxI: Downloading tv player API JSON
+[youtube] Pf8QguZPnxI: Downloading web safari player API JSON
+[youtube] Pf8QguZPnxI: Downloading m3u8 information
+[info] Pf8QguZPnxI: Downloading 1 format(s): 251
+[download] Sleeping 4.00 seconds as required by the site...
+[download] Destination: C:\Dev\dotnet\YTdownloadBackend\downloads\Timro Pratiksha - Shallum lama (Speed up) Easy Lyrics.webm
+[download]   0.0% of    3.47MiB at  333.25KiB/s ETA 00:14[download]   0.1% of    3.47MiB at  500.20KiB/s ETA 00:07[download]   0.2% of    3.47MiB at  777.48KiB/s ETA 00:04[download]   0.4% of    3.47MiB at    1.33MiB/s ETA 00:02[download]   0.9% of    3.47MiB at    1.89MiB/s ETA 00:01[download]   1.8% of    3.47MiB at    3.08MiB/s ETA 00:01[download]   3.6% of    3.47MiB at    2.43MiB/s ETA 00:01[download]   7.2% of    3.47MiB at    2.59MiB/s ETA 00:01[download]  14.4% of    3.47MiB at    2.85MiB/s ETA 00:01[download]  28.8% of    3.47MiB at    2.70MiB/s ETA 00:00[download]  57.6% of    3.47MiB at    2.99MiB/s ETA 00:00[download] 100.0% of    3.47MiB at    3.44MiB/s ETA 00:00[download] 100% of    3.47MiB in 00:00:01 at 2.89MiB/s   
+[ExtractAudio] Destination: C:\Dev\dotnet\YTdownloadBackend\downloads\Timro Pratiksha - Shallum lama (Speed up) Easy Lyrics.mp3
+Deleting original file C:\Dev\dotnet\YTdownloadBackend\downloads\Timro Pratiksha - Shallum lama (Speed up) Easy Lyrics.webm (pass -k to keep)
+
+
+

@@ -1,5 +1,6 @@
 ﻿using Microsoft.EntityFrameworkCore;
-using YTdownloadBackend.Models; // adjust namespace if your Models folder is named differently
+using YTdownloadBackend.Models;
+using YTdownloadBackend.Models.YTdownloadBackend.Models; // adjust namespace if your Models folder is named differently
 
 namespace YTdownloadBackend.Data
 {
@@ -12,6 +13,8 @@ namespace YTdownloadBackend.Data
         // This will create a table named "LoginRequests" by default
         public DbSet<User> Users => Set<User>();
         public DbSet<Playlist> Playlists => Set<Playlist>();
+
+        public DbSet<PlaylistSong> PlaylistSongs => Set<PlaylistSong>();
 
     }
 }
