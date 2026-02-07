@@ -1,4 +1,4 @@
-name: Build and Deploy to Laptop Server
+﻿name: Build and Deploy to Laptop Server
 
 on:
   push:
@@ -30,75 +30,87 @@ jobs:
       - name: Publish
         run: dotnet publish -c Release -o ./publish
       
+      - name: Create directories
+        run: |
+          New-Item -ItemType Directory -Path "C:\YTdownloadBackend" -Force | Out-Null
+          New-Item -ItemType Directory -Path "C:\YTdownloadBackend\logs" -Force | Out-Null
+      
       - name: Stop existing service (if running)
         run: |
           $service = Get-Service -Name "YTdownloadBackend" -ErrorAction SilentlyContinue
           if ($service) {
+            Write-Host "Stopping service..."
             Stop-Service -Name "YTdownloadBackend" -Force
-            Start-Sleep -Seconds 2
+            Start-Sleep -Seconds 3
           }
       
-      - name: Deploy to server
+      - name: Deploy files
         run: |
           $publishPath = ".\publish"
           $deployPath = "C:\YTdownloadBackend"
           
-          # Create deployment folder if doesn't exist
-          if (!(Test-Path $deployPath)) {
-            New-Item -ItemType Directory -Path $deployPath -Force | Out-Null
-          }
-          
-          # Copy files
+          Write-Host "Deploying to $deployPath"
           Copy-Item -Path "$publishPath\*" -Destination $deployPath -Recurse -Force
+          Write-Host "✅ Files deployed"
       
-      - name: Install Windows Service (if not exists)
+      - name: Install Windows Service
         run: |
           $serviceName = "YTdownloadBackend"
           $serviceExists = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
           
-          if (!$serviceExists) {
-            # Install NSSM if not already installed
+          if ($serviceExists) {
+            Write-Host "Service already exists, skipping installation"
+          } else {
+            Write-Host "Installing NSSM..."
+            New-Item -ItemType Directory -Path "C:\nssm" -Force | Out-Null
+            
+            $nssm_zip = "C:\nssm\nssm.zip"
             if (!(Test-Path "C:\nssm\nssm.exe")) {
-              Write-Host "Installing NSSM..."
-              New-Item -ItemType Directory -Path "C:\nssm" -Force | Out-Null
-              $nssm_zip = "C:\nssm\nssm.zip"
               Invoke-WebRequest -Uri "https://nssm.cc/download/nssm-2.24-106-g5ba4ba3.zip" -OutFile $nssm_zip
               Expand-Archive -Path $nssm_zip -DestinationPath "C:\nssm" -Force
-              Move-Item -Path "C:\nssm\nssm-2.24-106-g5ba4ba3\win64\nssm.exe" -Destination "C:\nssm\" -Force
+              Move-Item -Path "C:\nssm\nssm-2.24-106-g5ba4ba3\win64\nssm.exe" -Destination "C:\nssm\nssm.exe" -Force
+              Remove-Item -Path "C:\nssm\nssm-2.24-106-g5ba4ba3" -Recurse -Force
             }
             
-            # Create service
-            C:\nssm\nssm.exe install $serviceName "C:\YTdownloadBackend\YTdownloadBackend.exe"
-            C:\nssm\nssm.exe set $serviceName AppDirectory "C:\YTdownloadBackend"
-            C:\nssm\nssm.exe set $serviceName AppStdout "C:\YTdownloadBackend\logs\stdout.log"
-            C:\nssm\nssm.exe set $serviceName AppStderr "C:\YTdownloadBackend\logs\stderr.log"
+            Write-Host "Creating service..."
+            & C:\nssm\nssm.exe install $serviceName "C:\YTdownloadBackend\YTdownloadBackend.exe"
+            & C:\nssm\nssm.exe set $serviceName AppDirectory "C:\YTdownloadBackend"
+            & C:\nssm\nssm.exe set $serviceName AppStdout "C:\YTdownloadBackend\logs\stdout.log"
+            & C:\nssm\nssm.exe set $serviceName AppStderr "C:\YTdownloadBackend\logs\stderr.log"
+            Write-Host "✅ Service installed"
           }
       
       - name: Start service
         run: |
-          $service = Get-Service -Name "YTdownloadBackend" -ErrorAction SilentlyContinue
-          if ($service) {
-            Start-Service -Name "YTdownloadBackend"
-            Start-Sleep -Seconds 3
-            Get-Service -Name "YTdownloadBackend"
-          }
+          Write-Host "Starting service..."
+          Start-Service -Name "YTdownloadBackend"
+          Start-Sleep -Seconds 5
+          $service = Get-Service -Name "YTdownloadBackend"
+          Write-Host "Service status: $($service.Status)"
       
       - name: Verify deployment
         run: |
-          $maxAttempts = 10
+          Write-Host "Verifying deployment..."
+          $maxAttempts = 15
           $attempt = 0
+          $success = $false
+          
           while ($attempt -lt $maxAttempts) {
             try {
-              $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -ErrorAction SilentlyContinue
+              $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -ErrorAction Stop
               if ($response.StatusCode -eq 200) {
-                Write-Host "Service is running and responding!"
-                exit 0
+                Write-Host "✅ Service is healthy!"
+                $success = $true
+                break
               }
             } catch {
-              Write-Host "Attempt $($attempt + 1)/$maxAttempts - Service not ready yet..."
+              Write-Host "Attempt $($attempt + 1)/$maxAttempts - Waiting for service..."
               Start-Sleep -Seconds 2
-              $attempt++
             }
+            $attempt++
           }
-          Write-Host "Service verification failed!"
-          exit 1
+          
+          if (!$success) {
+            Write-Host "❌ Service verification failed after $maxAttempts attempts"
+            exit 1
+          }
