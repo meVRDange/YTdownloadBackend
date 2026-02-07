@@ -1,0 +1,104 @@
+name: Build and Deploy to Laptop Server
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: [self-hosted, windows, x64]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      
+      - name: Restore dependencies
+        run: dotnet restore
+      
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+      
+      - name: Run tests (if any)
+        run: dotnet test --configuration Release --no-build --verbosity normal
+        continue-on-error: true
+      
+      - name: Publish
+        run: dotnet publish -c Release -o ./publish
+      
+      - name: Stop existing service (if running)
+        run: |
+          $service = Get-Service -Name "YTdownloadBackend" -ErrorAction SilentlyContinue
+          if ($service) {
+            Stop-Service -Name "YTdownloadBackend" -Force
+            Start-Sleep -Seconds 2
+          }
+      
+      - name: Deploy to server
+        run: |
+          $publishPath = ".\publish"
+          $deployPath = "C:\YTdownloadBackend"
+          
+          # Create deployment folder if doesn't exist
+          if (!(Test-Path $deployPath)) {
+            New-Item -ItemType Directory -Path $deployPath -Force | Out-Null
+          }
+          
+          # Copy files
+          Copy-Item -Path "$publishPath\*" -Destination $deployPath -Recurse -Force
+      
+      - name: Install Windows Service (if not exists)
+        run: |
+          $serviceName = "YTdownloadBackend"
+          $serviceExists = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+          
+          if (!$serviceExists) {
+            # Install NSSM if not already installed
+            if (!(Test-Path "C:\nssm\nssm.exe")) {
+              Write-Host "Installing NSSM..."
+              New-Item -ItemType Directory -Path "C:\nssm" -Force | Out-Null
+              $nssm_zip = "C:\nssm\nssm.zip"
+              Invoke-WebRequest -Uri "https://nssm.cc/download/nssm-2.24-106-g5ba4ba3.zip" -OutFile $nssm_zip
+              Expand-Archive -Path $nssm_zip -DestinationPath "C:\nssm" -Force
+              Move-Item -Path "C:\nssm\nssm-2.24-106-g5ba4ba3\win64\nssm.exe" -Destination "C:\nssm\" -Force
+            }
+            
+            # Create service
+            C:\nssm\nssm.exe install $serviceName "C:\YTdownloadBackend\YTdownloadBackend.exe"
+            C:\nssm\nssm.exe set $serviceName AppDirectory "C:\YTdownloadBackend"
+            C:\nssm\nssm.exe set $serviceName AppStdout "C:\YTdownloadBackend\logs\stdout.log"
+            C:\nssm\nssm.exe set $serviceName AppStderr "C:\YTdownloadBackend\logs\stderr.log"
+          }
+      
+      - name: Start service
+        run: |
+          $service = Get-Service -Name "YTdownloadBackend" -ErrorAction SilentlyContinue
+          if ($service) {
+            Start-Service -Name "YTdownloadBackend"
+            Start-Sleep -Seconds 3
+            Get-Service -Name "YTdownloadBackend"
+          }
+      
+      - name: Verify deployment
+        run: |
+          $maxAttempts = 10
+          $attempt = 0
+          while ($attempt -lt $maxAttempts) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -ErrorAction SilentlyContinue
+              if ($response.StatusCode -eq 200) {
+                Write-Host "Service is running and responding!"
+                exit 0
+              }
+            } catch {
+              Write-Host "Attempt $($attempt + 1)/$maxAttempts - Service not ready yet..."
+              Start-Sleep -Seconds 2
+              $attempt++
+            }
+          }
+          Write-Host "Service verification failed!"
+          exit 1

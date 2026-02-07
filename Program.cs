@@ -132,6 +132,12 @@ app.UseHttpsRedirection();
 var downloadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "downloads");
 Directory.CreateDirectory(downloadsFolder);
 
+app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }))
+    .WithName("Health")
+    .WithOpenApi()
+    .AllowAnonymous();
+
+
 app.MapGet("/api/helthCheck", async (ILogger<Program> logger, HttpContext http, IFcmService fcmService) =>
 {
     // Try to get the JWT token from the Authorization header
