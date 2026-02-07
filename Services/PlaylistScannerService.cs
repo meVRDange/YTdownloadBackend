@@ -1,6 +1,6 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using YTdownloadBackend.Data;
-using YTdownloadBackend.Models.YTdownloadBackend.Models;
+using YTdownloadBackend.Models;
 
 namespace YTdownloadBackend.Services
 {
@@ -17,19 +17,54 @@ namespace YTdownloadBackend.Services
             _downloader = downloader;
         }
 
-        public async Task ScanForNewAsync(string playlistId, string userName)
-        {
-            var playlist = await _context.Playlists.FirstOrDefaultAsync(p => p.PlaylistId == playlistId);
-            if (playlist == null)
-            {
-                Console.WriteLine("Playlist not found in DB");
-                return;
-            }
+        //public async Task ScanForNewAsync(string playlistId, string userName)
+        //{
 
+        //    List<PlaylistSong>? playlistSongs = await _youTube.GetPlaylistVideosAsync(playlistId);
+        //    if (playlistSongs == null)
+        //    {
+        //        Console.WriteLine("The playlist does not Have any songs");
+        //        return;
+        //    }
+
+        //    List<string> existingVideoIds = await _context.PlaylistSongs
+        //        .Where(ps => ps.PlaylistId == playlistId)
+        //        .Select(ps => ps.VideoId)
+        //        .ToListAsync();
+
+        //    List<PlaylistSong>? missing = playlistSongs
+        //        .Where(v => !existingVideoIds.Contains(v.VideoId))
+        //        .ToList();
+
+        //    Console.WriteLine($"Found {missing.Count} new songs.");
+
+        //    foreach (var song in missing)
+        //    {
+        //        Console.WriteLine($"Downloading {song.Title}...");
+        //        bool ok = await _downloader.DownloadAudioAsync(song.VideoId);
+
+                
+        //        if (ok)
+        //        {
+        //            _context.PlaylistSongs.Add(song);
+        //            await _context.SaveChangesAsync();
+        //            Console.WriteLine($"✅ Downloaded: {song.Title}");
+        //        }
+        //        else
+        //        {
+        //            Console.WriteLine($"❌ Failed: {song.Title}");
+        //        }
+        //    }
+        //}
+
+
+        public async Task ScanForNewAddedSongsAsync(string playlistId, string userName)
+        {
+            //Getting songs from YouTube
             List<PlaylistSong>? playlistSongs = await _youTube.GetPlaylistVideosAsync(playlistId);
             if (playlistSongs == null)
             {
-                Console.WriteLine("The playlist does not Have any songs");
+                Console.WriteLine("The playlist does not have any songs");
                 return;
             }
 
@@ -38,29 +73,22 @@ namespace YTdownloadBackend.Services
                 .Select(ps => ps.VideoId)
                 .ToListAsync();
 
-            List<PlaylistSong>? missing = playlistSongs
+            List<PlaylistSong> missing = playlistSongs
                 .Where(v => !existingVideoIds.Contains(v.VideoId))
                 .ToList();
 
             Console.WriteLine($"Found {missing.Count} new songs.");
 
+            // save songs in DB
             foreach (var song in missing)
             {
-                Console.WriteLine($"Downloading {song.Title}...");
-                bool ok = await _downloader.DownloadAudioAsync(song.VideoId);
-
-                
-                if (ok)
-                {
-                    _context.PlaylistSongs.Add(song);
-                    await _context.SaveChangesAsync();
-                    Console.WriteLine($"✅ Downloaded: {song.Title}");
-                }
-                else
-                {
-                    Console.WriteLine($"❌ Failed: {song.Title}");
-                }
+                song.Status = PlaylistSongStatus.Pending; // Mark as pending for download
+                _context.PlaylistSongs.Add(song);
+                Console.WriteLine($"Added: {song.Title}");
             }
+
+            await _context.SaveChangesAsync();
+            Console.WriteLine($"✅ Saved {missing.Count} new songs to database");
         }
     }
 }

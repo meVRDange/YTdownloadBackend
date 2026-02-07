@@ -6,7 +6,7 @@ namespace YTdownloadBackend.Services
 
     public interface IYtDlpService
     {
-        Task<bool> DownloadAudioAsync(string videoId);
+        Task<string?> DownloadAudioAsync(string videoId, string username);
     }
 
     public class YtDlpService : IYtDlpService
@@ -18,7 +18,12 @@ namespace YTdownloadBackend.Services
 
         public YtDlpService()
         {
-            string ytDlpFileName = "yt-dlp" + (OperatingSystem.IsWindows() ? ".exe" : "");
+            string ytDlpFileName = "yt-dlp.exe";
+
+            _ytDlpPath = //get value from appsettings.json or environment variable if needed    
+                
+
+
             _ytDlpPath = Path.Combine(Directory.GetCurrentDirectory(), "yt-dlp", ytDlpFileName);
             _downloadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "downloads");
             _versionFile = Path.Combine(Directory.GetCurrentDirectory(), "yt-dlp.lastcheck");
@@ -27,28 +32,32 @@ namespace YTdownloadBackend.Services
         }
 
 
-        public async Task<bool> DownloadAudioAsync(string videoId)
+        public async Task<string?> DownloadAudioAsync(string videoId, string username)
         {
             await EnsureYtDlpUpToDateAsync();
 
-            var result = await RunYtDlpAsync(videoId);
+            var result = await RunYtDlpAsync(videoId, username);
 
             if (result.StdErr.Contains("ERROR", StringComparison.OrdinalIgnoreCase))
             {
                 Console.WriteLine("⚠️ yt-dlp reported an ERROR. Trying to update and retry...");
                 await UpdateYtDlpAsync();
 
-                result = await RunYtDlpAsync(videoId);
+                result = await RunYtDlpAsync(videoId, username);
             }
 
             bool success = result.ExitCode == 0 && !result.StdErr.Contains("ERROR", StringComparison.OrdinalIgnoreCase);
 
             if (success)
+            {
                 Console.WriteLine($"✅ Downloaded successfully: {videoId}");
+                return result.Filename;
+            }
             else
+            {
                 Console.WriteLine($"❌ Download failed: {videoId}\n{result.StdErr}");
-
-            return success;
+                return null;
+            }
         }
 
 
@@ -102,11 +111,35 @@ namespace YTdownloadBackend.Services
         //}
 
 
-        private async Task<(int ExitCode, string StdOut, string StdErr)> RunYtDlpAsync(string videoId)
+        private async Task<(int ExitCode, string StdOut, string StdErr, string? Filename)> RunYtDlpAsync(string videoId, string username)
         {
-            string outputTemplate = Path.Combine(_downloadsFolder, "%(title)s.%(ext)s");
-            string args = $"--extract-audio --audio-format mp3 -o \"{outputTemplate}\" https://www.youtube.com/watch?v={videoId}";
-            return await RunProcessAsync(_ytDlpPath, args);
+            string outputTemplate = Path.Combine(_downloadsFolder, username, "%(title)s.%(ext)s");
+            string args = $"--restrict-filenames --extract-audio --audio-format mp3 -o \"{outputTemplate}\" https://www.youtube.com/watch?v={videoId}";
+            var result = await RunProcessAsync(_ytDlpPath, args);
+            
+            // Parse filename from StdOut (assuming yt-dlp outputs something like "[download] Destination: /path/to/file.mp3")
+            string? filename = null;
+            var lines = result.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var line in lines)
+            {
+                if (line.Contains("Destination:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var parts = line.Split("Destination:", StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length > 1)
+                    {
+                        filename = parts[1].Trim().Replace(".webm", ".mp3");
+                        break;
+                    }
+                } else if(line.Contains("already been downloaded", StringComparison.OrdinalIgnoreCase))
+                {
+                    var parts = line.Split(" ", StringSplitOptions.RemoveEmptyEntries);
+                        filename = parts[1].Trim().Replace(".webm", ".mp3");
+                        break;
+                    
+                }
+            }
+            
+            return (result.ExitCode, result.StdOut, result.StdErr, filename);
         }
 
 
@@ -130,51 +163,5 @@ namespace YTdownloadBackend.Services
 
             return (process.ExitCode, stdOut, stdErr);
         }
-
-        //public async Task<bool> DownloadAudioAsync(string videoId)
-        //{
-        //    try { 
-        //    string ytDlpFileName = "yt-dlp";
-        //    if (OperatingSystem.IsWindows()) ytDlpFileName += ".exe";
-
-        //    string ytDlpPath = Path.Combine(Directory.GetCurrentDirectory(), "yt-dlp", ytDlpFileName);
-        //    if (!File.Exists(ytDlpPath))
-        //    {
-        //        Console.WriteLine($"yt-dlp not found at {ytDlpPath}");
-        //        return false;
-        //    }
-
-        //    string downloadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "downloads");
-        //    Directory.CreateDirectory(downloadsFolder);
-
-        //    string outputTemplate = Path.Combine(downloadsFolder, "%(title)s.%(ext)s");
-
-        //    var psi = new ProcessStartInfo
-        //    {
-        //        FileName = ytDlpPath,
-        //        Arguments = $"--extract-audio --audio-format mp3 -o \"{outputTemplate}\" https://www.youtube.com/watch?v={videoId}",
-        //        RedirectStandardOutput = true,
-        //        RedirectStandardError = true,
-        //        UseShellExecute = false,
-        //        CreateNoWindow = false
-        //    };
-
-
-        //        var process = Process.Start(psi);
-        //        if (process == null) return false;
-
-        //        string stdOut = await process.StandardOutput.ReadToEndAsync();
-        //        string stdErr = await process.StandardError.ReadToEndAsync();
-
-        //        await File.AppendAllTextAsync("yt-dlp-logs.txt",
-        //            $"[{DateTime.Now}] {videoId}\n{stdOut}\n{stdErr}\n\n");
-
-        //        await process.WaitForExitAsync();
-        //        return process.ExitCode == 0;
-        //    } catch(Exception ex)
-        //    {
-        //        return false;
-        //    }
-        //}
     }
 }

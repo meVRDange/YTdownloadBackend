@@ -1,7 +1,11 @@
-﻿using System.Diagnostics;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
 using YTdownloadBackend.Models;
 using YTdownloadBackend.Models.YTdownloadBackend.Models;
 
@@ -17,11 +21,13 @@ namespace YTdownloadBackend.Services
     {
         private readonly HttpClient _http;
         private readonly string _apiKey;
+        private const int ApiMaxPerPage = 50;
+        private const int MaxTotalItems = 2000;
 
         public YouTubeService(HttpClient httpClient, IConfiguration config)
         {
             _http = httpClient;
-            //  Use environment variable first, fallback to config (for dev)
+            // Use environment variable first, fallback to config (for dev)
             _apiKey = Environment.GetEnvironmentVariable("YOUTUBE_API_KEY")
                       ?? config["YouTube:ApiKey"]
                       ?? throw new InvalidOperationException("YouTube API key not configured");
@@ -47,49 +53,74 @@ namespace YTdownloadBackend.Services
 
         public async Task<List<PlaylistSong>?> GetPlaylistVideosAsync(string playlistId)
         {
-            var url = $"https://www.googleapis.com/youtube/v3/playlistItems" +
-                      $"?part=snippet&playlistId={playlistId}&key={_apiKey}";
+            var results = new List<PlaylistSong>();
+            string? pageToken = null;
 
             try
             {
-                var resp = await _http.GetFromJsonAsync<YouTubelistSongPlaylistResponse>(url);
-                if (resp?.items == null)
-                    return null;
+                do
+                {
+                    var tokenPart = string.IsNullOrEmpty(pageToken) ? "" : $"&pageToken={pageToken}";
+                    var url = $"https://www.googleapis.com/youtube/v3/playlistItems" +
+                              $"?part=snippet&playlistId={playlistId}&key={_apiKey}&maxResults={ApiMaxPerPage}{tokenPart}";
 
-                // Map YouTubePlaylistItem to YouTubeVideo
-                List<PlaylistSong> videos = (
-                    resp.items.Select(
-                        item => new PlaylistSong
+                    var resp = await _http.GetFromJsonAsync<YouTubelistSongPlaylistResponse>(url);
+                    if (resp?.items == null || resp.items.Count == 0)
+                        break;
+
+                    foreach (var item in resp.items)
+                    {
+                        var thumb = item.snippet?.thumbnails?.high?.url
+                                    ?? item.snippet?.thumbnails?.medium?.url
+                                    ?? item.snippet?.thumbnails?.@default?.url;
+
+                        results.Add(new PlaylistSong
                         {
                             PlaylistId = playlistId,
-                            VideoId = item.snippet.resourceId.videoId,
-                            Title = item.snippet.title,
-                            ThumbnailUrl = item.ToString().Contains("high") ? item.snippet.thumbnails.high.url : null
+                            VideoId = item.snippet?.resourceId?.videoId ?? string.Empty,
+                            Title = item.snippet?.title,
+                            ThumbnailUrl = thumb
+                        });
 
-                        })).ToList();
+                        if (results.Count >= MaxTotalItems)
+                            break;
+                    }
 
-                return videos;
+                    if (results.Count >= MaxTotalItems)
+                        break;
+
+                    pageToken = resp.nextPageToken;
+
+                } while (!string.IsNullOrEmpty(pageToken));
+
+                // Ensure we never return more than the configured maximum
+                return results.Take(MaxTotalItems).ToList();
             }
             catch (Exception ex)
             {
-                // Optionally log the error with ILogger
                 Console.WriteLine($"YouTube API error: {ex.Message}");
                 return null;
             }
         }
 
         // DTOs for JSON mapping
-        private record YouTubeTitlePlaylistResponse(List<YouTubeTitlePlaylistItem> items);
-        private record YouTubeTitlePlaylistItem(YouTubeTitleSnippet snippet);
-        private record YouTubeTitleSnippet(string title);
+        private record YouTubeTitlePlaylistResponse(List<YouTubeTitlePlaylistItem>? items);
+        private record YouTubeTitlePlaylistItem(YouTubeTitleSnippet? snippet);
+        private record YouTubeTitleSnippet(string? title);
 
+        private record YouTubelistSongPlaylistResponse(List<YouTubelistSongPlaylistItem>? items, string? nextPageToken);
+        private record YouTubelistSongPlaylistItem(YouTubelistSongSnippet? snippet);
+        private record YouTubelistSongSnippet(string? title, YouTubelistSongResourceId? resourceId, YouTubelistSongThumbnails? thumbnails);
+        private record YouTubelistSongResourceId(string? videoId);
 
-        private record YouTubelistSongPlaylistResponse(List<YouTubelistSongPlaylistItem> items);
-        private record YouTubelistSongPlaylistItem(YouTubelistSongSnippet snippet);
-        private record YouTubelistSongSnippet(string title, YouTubelistSongResourceId resourceId, YouTubelistSongThumbnails thumbnails);
-        private record YouTubelistSongResourceId(string videoId);
-        private record YouTubelistSongThumbnails(YouTubelistSongThumbnailsHigh high);
-        private record YouTubelistSongThumbnailsHigh(string url);
+        private record YouTubelistSongThumbnails(
+            YouTubelistSongThumbnailsHigh? high,
+            YouTubelistSongThumbnailsMedium? medium,
+            [property: JsonPropertyName("default")] YouTubelistSongThumbnailsDefault? @default
+        );
 
+        private record YouTubelistSongThumbnailsHigh(string? url);
+        private record YouTubelistSongThumbnailsMedium(string? url);
+        private record YouTubelistSongThumbnailsDefault(string? url);
     }
 }

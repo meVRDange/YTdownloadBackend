@@ -15,6 +15,7 @@ namespace YTdownloadBackend.Data
         public DbSet<Playlist> Playlists => Set<Playlist>();
 
         public DbSet<PlaylistSong> PlaylistSongs => Set<PlaylistSong>();
+        public DbSet<DownloadTask> DownloadTasks => Set<DownloadTask>();
 
     }
 }
