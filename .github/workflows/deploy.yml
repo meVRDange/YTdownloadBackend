@@ -9,62 +9,129 @@ jobs:
   build-and-deploy:
     runs-on: [self-hosted, windows, x64]
     
+    defaults:
+      run:
+        shell: pwsh
+    
     steps:
       - uses: actions/checkout@v4
       
       - name: Verify .NET Installation
+        shell: pwsh
         run: |
           Write-Host "Checking .NET installation..." -ForegroundColor Yellow
-          try {
-            $dotnetVersion = & dotnet --version
-            Write-Host "✅ .NET is installed: $dotnetVersion" -ForegroundColor Green
-            & dotnet --info
-          } catch {
-            Write-Host "❌ .NET is not installed or not in PATH!" -ForegroundColor Red
-            Write-Host "Please install .NET 8.0 SDK or higher from: https://dotnet.microsoft.com/download" -ForegroundColor Yellow
+          $dotnetVersion = dotnet --version
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "✅ .NET version: $dotnetVersion" -ForegroundColor Green
+            
+            # Check if .NET 10 SDK is available
+            $sdks = dotnet --list-sdks
+            if ($sdks -match "10\.0") {
+              Write-Host "✅ .NET 10 SDK found" -ForegroundColor Green
+            } else {
+              Write-Host "⚠️ .NET 10 SDK not found, using available SDK" -ForegroundColor Yellow
+            }
+          } else {
+            Write-Host "❌ .NET is not installed!" -ForegroundColor Red
             exit 1
           }
       
       - name: Restore dependencies
+        shell: pwsh
         run: dotnet restore
       
       - name: Build
+        shell: pwsh
         run: dotnet build --configuration Release --no-restore
       
       - name: Run tests (if any)
+        shell: pwsh
         run: dotnet test --configuration Release --no-build --verbosity normal
         continue-on-error: true
       
       - name: Publish
-        run: dotnet publish -c Release -o ./publish
+        shell: pwsh
+        run: dotnet publish -c Release -o ./publish --self-contained false
       
-      - name: Create directories
+      - name: Create secure directories on D drive
+        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path "C:\YTdownloadBackend" -Force | Out-Null
-          New-Item -ItemType Directory -Path "C:\YTdownloadBackend\logs" -Force | Out-Null
+          Write-Host "Creating directories on D: drive..." -ForegroundColor Yellow
+          New-Item -ItemType Directory -Path "D:\YTdownloadBackend" -Force | Out-Null
+          New-Item -ItemType Directory -Path "D:\YTdownloadBackend\logs" -Force | Out-Null
+          
+          # Set restrictive permissions (only SYSTEM and Administrators)
+          $acl = Get-Acl "D:\YTdownloadBackend"
+          $acl.SetAccessRuleProtection($true, $false)
+          
+          # Remove all existing permissions
+          $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
+          
+          # Add SYSTEM full control
+          $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+          )
+          $acl.AddAccessRule($systemRule)
+          
+          # Add Administrators full control
+          $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            "Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+          )
+          $acl.AddAccessRule($adminRule)
+          
+          Set-Acl "D:\YTdownloadBackend" $acl
+          Write-Host "✅ Secure directories created with restricted permissions" -ForegroundColor Green
       
       - name: Stop existing service (if running)
+        shell: pwsh
         run: |
           $service = Get-Service -Name "YTdownloadBackend" -ErrorAction SilentlyContinue
           if ($service) {
             Write-Host "Stopping service..." -ForegroundColor Yellow
             Stop-Service -Name "YTdownloadBackend" -Force
-            Start-Sleep -Seconds 3
+            Start-Sleep -Seconds 5
+            
+            # Ensure all processes are stopped
+            Get-Process | Where-Object {$_.Path -like "*YTdownloadBackend*"} | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            
             Write-Host "✅ Service stopped" -ForegroundColor Green
           } else {
             Write-Host "Service not found, skipping stop step" -ForegroundColor Gray
           }
       
-      - name: Deploy files
+      - name: Deploy files to D drive
+        shell: pwsh
         run: |
           $publishPath = ".\publish"
-          $deployPath = "C:\YTdownloadBackend"
+          $deployPath = "D:\YTdownloadBackend"
           
-          Write-Host "Deploying to $deployPath" -ForegroundColor Yellow
+          Write-Host "Deploying to $deployPath..." -ForegroundColor Yellow
+          
+          # Backup appsettings.Production.json if exists
+          $prodSettings = "$deployPath\appsettings.Production.json"
+          $backupSettings = "$deployPath\appsettings.Production.json.backup"
+          if (Test-Path $prodSettings) {
+            Write-Host "Backing up production settings..." -ForegroundColor Cyan
+            Copy-Item -Path $prodSettings -Destination $backupSettings -Force
+          }
+          
           Copy-Item -Path "$publishPath\*" -Destination $deployPath -Recurse -Force
-          Write-Host "✅ Files deployed" -ForegroundColor Green
+          
+          # Restore production settings if backed up
+          if (Test-Path $backupSettings) {
+            Write-Host "Restoring production settings..." -ForegroundColor Cyan
+            Copy-Item -Path $backupSettings -Destination $prodSettings -Force
+            Remove-Item $backupSettings -Force
+          }
+          
+          Write-Host "✅ Files deployed successfully" -ForegroundColor Green
+          
+          Write-Host "Deployed files:" -ForegroundColor Cyan
+          Get-ChildItem -Path $deployPath -File | Select-Object Name, Length, LastWriteTime | Format-Table
       
-      - name: Install Windows Service
+      - name: Install Windows Service with NSSM
+        shell: pwsh
         run: |
           $serviceName = "YTdownloadBackend"
           $serviceExists = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -72,74 +139,143 @@ jobs:
           if ($serviceExists) {
             Write-Host "✅ Service already exists, skipping installation" -ForegroundColor Green
           } else {
-            Write-Host "Installing NSSM..." -ForegroundColor Yellow
-            New-Item -ItemType Directory -Path "C:\nssm" -Force | Out-Null
+            Write-Host "Installing NSSM to D: drive..." -ForegroundColor Yellow
+            New-Item -ItemType Directory -Path "D:\nssm" -Force | Out-Null
             
-            $nssm_zip = "C:\nssm\nssm.zip"
-            if (!(Test-Path "C:\nssm\nssm.exe")) {
+            $nssm_exe = "D:\nssm\nssm.exe"
+            if (!(Test-Path $nssm_exe)) {
               Write-Host "Downloading NSSM..." -ForegroundColor Yellow
-              Invoke-WebRequest -Uri "https://nssm.cc/download/nssm-2.24-106-g5ba4ba3.zip" -OutFile $nssm_zip
-              Expand-Archive -Path $nssm_zip -DestinationPath "C:\nssm" -Force
-              Move-Item -Path "C:\nssm\nssm-2.24-106-g5ba4ba3\win64\nssm.exe" -Destination "C:\nssm\nssm.exe" -Force
-              Remove-Item -Path "C:\nssm\nssm-2.24-106-g5ba4ba3" -Recurse -Force
+              $nssm_zip = "D:\nssm\nssm.zip"
+              Invoke-WebRequest -Uri "https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip" -OutFile $nssm_zip
+              Expand-Archive -Path $nssm_zip -DestinationPath "D:\nssm\temp" -Force
+              
+              $nssmSource = Get-ChildItem -Path "D:\nssm\temp" -Filter "nssm.exe" -Recurse | Where-Object {$_.Directory.Name -eq "win64"} | Select-Object -First 1
+              Move-Item -Path $nssmSource.FullName -Destination $nssm_exe -Force
+              Remove-Item -Path "D:\nssm\temp" -Recurse -Force
               Remove-Item $nssm_zip -Force
+              Write-Host "✅ NSSM downloaded" -ForegroundColor Green
             }
             
             Write-Host "Creating Windows Service..." -ForegroundColor Yellow
-            & C:\nssm\nssm.exe install $serviceName "C:\YTdownloadBackend\YTdownloadBackend.exe"
-            & C:\nssm\nssm.exe set $serviceName AppDirectory "C:\YTdownloadBackend"
-            & C:\nssm\nssm.exe set $serviceName AppStdout "C:\YTdownloadBackend\logs\stdout.log"
-            & C:\nssm\nssm.exe set $serviceName AppStderr "C:\YTdownloadBackend\logs\stderr.log"
-            Write-Host "✅ Service installed" -ForegroundColor Green
+            & $nssm_exe install $serviceName "D:\YTdownloadBackend\YTdownloadBackend.exe"
+            & $nssm_exe set $serviceName AppDirectory "D:\YTdownloadBackend"
+            & $nssm_exe set $serviceName AppEnvironmentExtra "ASPNETCORE_ENVIRONMENT=Production"
+            & $nssm_exe set $serviceName AppStdout "D:\YTdownloadBackend\logs\stdout.log"
+            & $nssm_exe set $serviceName AppStderr "D:\YTdownloadBackend\logs\stderr.log"
+            
+            # Log rotation settings
+            & $nssm_exe set $serviceName AppRotateFiles 1
+            & $nssm_exe set $serviceName AppRotateOnline 1
+            & $nssm_exe set $serviceName AppRotateSeconds 86400
+            & $nssm_exe set $serviceName AppRotateBytes 10485760
+            
+            # Service recovery settings
+            & $nssm_exe set $serviceName AppExit Default Restart
+            & $nssm_exe set $serviceName AppRestartDelay 5000
+            
+            Write-Host "✅ Service installed with production settings" -ForegroundColor Green
           }
       
       - name: Start service
+        shell: pwsh
         run: |
           Write-Host "Starting service..." -ForegroundColor Yellow
           Start-Service -Name "YTdownloadBackend"
           Start-Sleep -Seconds 5
+          
           $service = Get-Service -Name "YTdownloadBackend"
           Write-Host "✅ Service status: $($service.Status)" -ForegroundColor Green
+          
+          if ($service.Status -ne 'Running') {
+            Write-Host "❌ Service failed to start!" -ForegroundColor Red
+            
+            # Show recent error logs
+            if (Test-Path "D:\YTdownloadBackend\logs\stderr.log") {
+              Write-Host "`n--- Error Log ---" -ForegroundColor Red
+              Get-Content "D:\YTdownloadBackend\logs\stderr.log" -Tail 50
+            }
+            exit 1
+          }
       
       - name: Verify deployment
+        shell: pwsh
         run: |
           Write-Host "Verifying deployment..." -ForegroundColor Yellow
-          $maxAttempts = 15
+          $maxAttempts = 20
           $attempt = 0
           $success = $false
           
           while ($attempt -lt $maxAttempts) {
             try {
-              $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -ErrorAction Stop
+              $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -ErrorAction Stop -TimeoutSec 5
               if ($response.StatusCode -eq 200) {
                 Write-Host "✅ Service is healthy and responding!" -ForegroundColor Green
+                Write-Host "Response: $($response.Content)" -ForegroundColor Cyan
                 $success = $true
                 break
               }
             } catch {
               Write-Host "Attempt $($attempt + 1)/$maxAttempts - Waiting for service..." -ForegroundColor Gray
-              Start-Sleep -Seconds 2
+              Start-Sleep -Seconds 3
             }
             $attempt++
           }
           
           if (!$success) {
             Write-Host "❌ Service verification failed after $maxAttempts attempts" -ForegroundColor Red
-            Write-Host "Checking service logs..." -ForegroundColor Yellow
-            if (Test-Path "C:\YTdownloadBackend\logs\stderr.log") {
-              Write-Host "`n--- Error Log ---" -ForegroundColor Red
-              Get-Content "C:\YTdownloadBackend\logs\stderr.log" -Tail 20
+            Write-Host "`nChecking service logs..." -ForegroundColor Yellow
+            
+            if (Test-Path "D:\YTdownloadBackend\logs\stderr.log") {
+              Write-Host "`n--- Last 30 lines of Error Log ---" -ForegroundColor Red
+              Get-Content "D:\YTdownloadBackend\logs\stderr.log" -Tail 30
             }
+            
+            if (Test-Path "D:\YTdownloadBackend\logs\stdout.log") {
+              Write-Host "`n--- Last 30 lines of Output Log ---" -ForegroundColor Cyan
+              Get-Content "D:\YTdownloadBackend\logs\stdout.log" -Tail 30
+            }
+            
+            # Check Windows Event Log
+            Write-Host "`n--- Recent Application Events ---" -ForegroundColor Yellow
+            Get-EventLog -LogName Application -Source "YTdownloadBackend" -Newest 5 -ErrorAction SilentlyContinue | Format-List
+            
             exit 1
           }
       
+      - name: Security Check
+        shell: pwsh
+        run: |
+          Write-Host "`nRunning security checks..." -ForegroundColor Yellow
+          
+          # Check if service is running under correct account
+          $service = Get-WmiObject Win32_Service | Where-Object {$_.Name -eq "YTdownloadBackend"}
+          Write-Host "Service runs as: $($service.StartName)" -ForegroundColor Cyan
+          
+          # Check file permissions
+          $acl = Get-Acl "D:\YTdownloadBackend"
+          Write-Host "`nDirectory Permissions:" -ForegroundColor Cyan
+          $acl.Access | Select-Object IdentityReference, FileSystemRights, AccessControlType | Format-Table
+          
+          Write-Host "✅ Security check complete" -ForegroundColor Green
+      
       - name: Deployment Summary
+        shell: pwsh
         run: |
           Write-Host "`n========================================" -ForegroundColor Cyan
-          Write-Host "   DEPLOYMENT SUCCESSFUL" -ForegroundColor Cyan
+          Write-Host "   ✅ DEPLOYMENT SUCCESSFUL" -ForegroundColor Green
           Write-Host "========================================" -ForegroundColor Cyan
-          Write-Host "Service: YTdownloadBackend" -ForegroundColor White
+          Write-Host "Service Name: YTdownloadBackend" -ForegroundColor White
           Write-Host "Status: Running" -ForegroundColor Green
+          Write-Host "Environment: Production" -ForegroundColor Yellow
+          Write-Host "Location: D:\YTdownloadBackend" -ForegroundColor White
           Write-Host "Local URL: http://localhost:5000" -ForegroundColor White
-          Write-Host "Logs: C:\YTdownloadBackend\logs\" -ForegroundColor White
+          Write-Host "Health Check: http://localhost:5000/health" -ForegroundColor White
+          Write-Host "Logs: D:\YTdownloadBackend\logs\" -ForegroundColor White
+          Write-Host "========================================" -ForegroundColor Cyan
+          Write-Host "⚠️  SECURITY REMINDERS:" -ForegroundColor Yellow
+          Write-Host "  1. Configure Cloudflare Tunnel for HTTPS" -ForegroundColor White
+          Write-Host "  2. Enable JWT authentication" -ForegroundColor White
+          Write-Host "  3. Set up rate limiting" -ForegroundColor White
+          Write-Host "  4. Use environment variables for secrets" -ForegroundColor White
+          Write-Host "  5. Configure Windows Firewall" -ForegroundColor White
           Write-Host "========================================`n" -ForegroundColor Cyan
