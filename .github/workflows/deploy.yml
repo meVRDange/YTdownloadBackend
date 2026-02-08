@@ -138,16 +138,21 @@ jobs:
       
       - name: Install Windows Service with NSSM
         shell: powershell
+        timeout-minutes: 5
         run: |
           $serviceName = "YTdownloadBackend"
           $nssm_exe = "D:\nssm\nssm.exe"
           
           # Check if service already exists
+          Write-Host "Checking for existing service..." -ForegroundColor Yellow
           $serviceExists = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
           
           if ($serviceExists) {
-            Write-Host "✅ Service already exists, skipping installation" -ForegroundColor Green
+            Write-Host "✅ Service already exists (Status: $($serviceExists.Status))" -ForegroundColor Green
+            Write-Host "Skipping installation..." -ForegroundColor Gray
           } else {
+            Write-Host "Service does not exist, proceeding with installation..." -ForegroundColor Cyan
+            
             # Verify NSSM is installed
             if (!(Test-Path $nssm_exe)) {
               Write-Host "❌ NSSM not found at D:\nssm\nssm.exe" -ForegroundColor Red
@@ -157,21 +162,54 @@ jobs:
             
             Write-Host "✅ NSSM found at: $nssm_exe" -ForegroundColor Green
             
-            # Verify NSSM version
-            $nssmVersion = & $nssm_exe version 2>&1 | Select-Object -First 2
-            Write-Host "NSSM Version:" -ForegroundColor Cyan
-            $nssmVersion | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+            # Kill any stuck NSSM processes first
+            $stuckNssm = Get-Process -Name "nssm" -ErrorAction SilentlyContinue
+            if ($stuckNssm) {
+              Write-Host "⚠️ Found stuck NSSM process, terminating..." -ForegroundColor Yellow
+              Stop-Process -Name "nssm" -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 2
+            }
             
-            # Install service
+            # Install service with timeout protection
             Write-Host "`nCreating Windows Service..." -ForegroundColor Yellow
-            & $nssm_exe install $serviceName "D:\YTdownloadBackend\YTdownloadBackend.exe"
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "❌ Failed to install service! Exit code: $LASTEXITCODE" -ForegroundColor Red
+            $installJob = Start-Job -ScriptBlock {
+              param($nssm, $service, $exe)
+              & $nssm install $service $exe 2>&1
+              return $LASTEXITCODE
+            } -ArgumentList $nssm_exe, $serviceName, "D:\YTdownloadBackend\YTdownloadBackend.exe"
+            
+            # Wait for job with 30 second timeout
+            $completed = Wait-Job $installJob -Timeout 30
+            
+            if ($completed) {
+              $exitCode = Receive-Job $installJob
+              Remove-Job $installJob -Force
+              
+              if ($exitCode -ne 0) {
+                Write-Host "❌ Failed to install service! Exit code: $exitCode" -ForegroundColor Red
+                exit 1
+              }
+              Write-Host "✅ Service installed successfully" -ForegroundColor Green
+            } else {
+              Write-Host "❌ Service installation timed out after 30 seconds!" -ForegroundColor Red
+              Stop-Job $installJob -ErrorAction SilentlyContinue
+              Remove-Job $installJob -Force -ErrorAction SilentlyContinue
+              
+              # Kill any NSSM processes
+              Stop-Process -Name "nssm" -Force -ErrorAction SilentlyContinue
+              exit 1
+            }
+            
+            # Verify service was created
+            Start-Sleep -Seconds 2
+            $serviceCheck = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+            if (!$serviceCheck) {
+              Write-Host "❌ Service was not created successfully!" -ForegroundColor Red
               exit 1
             }
             
             # Configure service
-            Write-Host "Configuring service..." -ForegroundColor Yellow
+            Write-Host "`nConfiguring service..." -ForegroundColor Yellow
             & $nssm_exe set $serviceName AppDirectory "D:\YTdownloadBackend"
             & $nssm_exe set $serviceName AppEnvironmentExtra "ASPNETCORE_ENVIRONMENT=Production"
             & $nssm_exe set $serviceName AppStdout "D:\YTdownloadBackend\logs\stdout.log"
@@ -187,7 +225,7 @@ jobs:
             & $nssm_exe set $serviceName AppExit Default Restart
             & $nssm_exe set $serviceName AppRestartDelay 5000
             
-            Write-Host "✅ Service installed with production settings" -ForegroundColor Green
+            Write-Host "✅ Service configuration complete" -ForegroundColor Green
             Write-Host "`nService Configuration:" -ForegroundColor Cyan
             Write-Host "  Executable: D:\YTdownloadBackend\YTdownloadBackend.exe" -ForegroundColor White
             Write-Host "  Working Dir: D:\YTdownloadBackend" -ForegroundColor White
