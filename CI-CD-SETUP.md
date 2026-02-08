@@ -5,7 +5,7 @@ Remove-Item ".\.runner" -Force -ErrorAction SilentlyContinue
 # Try with the fine-grained token
 .\config.cmd `
   --url "https://github.com/meVRDange/YTdownloadBackend" `
-  --token "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" `
+  --token "" `
   --name "Laptop-Server" `
   --work "_work"
 
