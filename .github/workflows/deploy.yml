@@ -11,79 +11,88 @@ jobs:
     
     defaults:
       run:
-        shell: pwsh
+        shell: powershell
     
     steps:
       - uses: actions/checkout@v4
       
       - name: Verify .NET Installation
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "Checking .NET installation..." -ForegroundColor Yellow
-          $dotnetVersion = dotnet --version
-          if ($LASTEXITCODE -eq 0) {
+          try {
+            $dotnetVersion = dotnet --version
             Write-Host "✅ .NET version: $dotnetVersion" -ForegroundColor Green
             
-            # Check if .NET 10 SDK is available
             $sdks = dotnet --list-sdks
+            Write-Host "`nInstalled SDKs:" -ForegroundColor Cyan
+            Write-Host $sdks
+            
             if ($sdks -match "10\.0") {
-              Write-Host "✅ .NET 10 SDK found" -ForegroundColor Green
+              Write-Host "`n✅ .NET 10 SDK found" -ForegroundColor Green
+            } elseif ($sdks -match "9\.0") {
+              Write-Host "`n⚠️ Using .NET 9 SDK (NET 10 not found)" -ForegroundColor Yellow
+            } elseif ($sdks -match "8\.0") {
+              Write-Host "`n⚠️ Using .NET 8 SDK (NET 10 not found)" -ForegroundColor Yellow
             } else {
-              Write-Host "⚠️ .NET 10 SDK not found, using available SDK" -ForegroundColor Yellow
+              Write-Host "`n❌ No compatible .NET SDK found!" -ForegroundColor Red
+              exit 1
             }
-          } else {
-            Write-Host "❌ .NET is not installed!" -ForegroundColor Red
+          } catch {
+            Write-Host "❌ .NET is not installed or not in PATH!" -ForegroundColor Red
             exit 1
           }
       
       - name: Restore dependencies
-        shell: pwsh
+        shell: powershell
         run: dotnet restore
       
       - name: Build
-        shell: pwsh
+        shell: powershell
         run: dotnet build --configuration Release --no-restore
       
       - name: Run tests (if any)
-        shell: pwsh
+        shell: powershell
         run: dotnet test --configuration Release --no-build --verbosity normal
         continue-on-error: true
       
       - name: Publish
-        shell: pwsh
+        shell: powershell
         run: dotnet publish -c Release -o ./publish --self-contained false
       
       - name: Create secure directories on D drive
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "Creating directories on D: drive..." -ForegroundColor Yellow
           New-Item -ItemType Directory -Path "D:\YTdownloadBackend" -Force | Out-Null
           New-Item -ItemType Directory -Path "D:\YTdownloadBackend\logs" -Force | Out-Null
           
-          # Set restrictive permissions (only SYSTEM and Administrators)
-          $acl = Get-Acl "D:\YTdownloadBackend"
-          $acl.SetAccessRuleProtection($true, $false)
-          
-          # Remove all existing permissions
-          $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
-          
-          # Add SYSTEM full control
-          $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            "SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
-          )
-          $acl.AddAccessRule($systemRule)
-          
-          # Add Administrators full control
-          $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            "Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
-          )
-          $acl.AddAccessRule($adminRule)
-          
-          Set-Acl "D:\YTdownloadBackend" $acl
-          Write-Host "✅ Secure directories created with restricted permissions" -ForegroundColor Green
+          Write-Host "Setting restrictive permissions..." -ForegroundColor Yellow
+          try {
+            $acl = Get-Acl "D:\YTdownloadBackend"
+            $acl.SetAccessRuleProtection($true, $false)
+            
+            $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
+            
+            $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+              "SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+            )
+            $acl.AddAccessRule($systemRule)
+            
+            $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+              "Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+            )
+            $acl.AddAccessRule($adminRule)
+            
+            Set-Acl "D:\YTdownloadBackend" $acl
+            Write-Host "✅ Secure directories created with restricted permissions" -ForegroundColor Green
+          } catch {
+            Write-Host "⚠️ Could not set restrictive permissions (non-fatal)" -ForegroundColor Yellow
+            Write-Host "✅ Directories created" -ForegroundColor Green
+          }
       
       - name: Stop existing service (if running)
-        shell: pwsh
+        shell: powershell
         run: |
           $service = Get-Service -Name "YTdownloadBackend" -ErrorAction SilentlyContinue
           if ($service) {
@@ -91,7 +100,6 @@ jobs:
             Stop-Service -Name "YTdownloadBackend" -Force
             Start-Sleep -Seconds 5
             
-            # Ensure all processes are stopped
             Get-Process | Where-Object {$_.Path -like "*YTdownloadBackend*"} | Stop-Process -Force -ErrorAction SilentlyContinue
             Start-Sleep -Seconds 2
             
@@ -101,14 +109,13 @@ jobs:
           }
       
       - name: Deploy files to D drive
-        shell: pwsh
+        shell: powershell
         run: |
           $publishPath = ".\publish"
           $deployPath = "D:\YTdownloadBackend"
           
           Write-Host "Deploying to $deployPath..." -ForegroundColor Yellow
           
-          # Backup appsettings.Production.json if exists
           $prodSettings = "$deployPath\appsettings.Production.json"
           $backupSettings = "$deployPath\appsettings.Production.json.backup"
           if (Test-Path $prodSettings) {
@@ -118,7 +125,6 @@ jobs:
           
           Copy-Item -Path "$publishPath\*" -Destination $deployPath -Recurse -Force
           
-          # Restore production settings if backed up
           if (Test-Path $backupSettings) {
             Write-Host "Restoring production settings..." -ForegroundColor Cyan
             Copy-Item -Path $backupSettings -Destination $prodSettings -Force
@@ -127,11 +133,11 @@ jobs:
           
           Write-Host "✅ Files deployed successfully" -ForegroundColor Green
           
-          Write-Host "Deployed files:" -ForegroundColor Cyan
-          Get-ChildItem -Path $deployPath -File | Select-Object Name, Length, LastWriteTime | Format-Table
+          Write-Host "`nDeployed files:" -ForegroundColor Cyan
+          Get-ChildItem -Path $deployPath -File | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
       
       - name: Install Windows Service with NSSM
-        shell: pwsh
+        shell: powershell
         run: |
           $serviceName = "YTdownloadBackend"
           $serviceExists = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -150,7 +156,12 @@ jobs:
               Expand-Archive -Path $nssm_zip -DestinationPath "D:\nssm\temp" -Force
               
               $nssmSource = Get-ChildItem -Path "D:\nssm\temp" -Filter "nssm.exe" -Recurse | Where-Object {$_.Directory.Name -eq "win64"} | Select-Object -First 1
-              Move-Item -Path $nssmSource.FullName -Destination $nssm_exe -Force
+              if ($nssmSource) {
+                Move-Item -Path $nssmSource.FullName -Destination $nssm_exe -Force
+              } else {
+                $nssmSource = Get-ChildItem -Path "D:\nssm\temp" -Filter "nssm.exe" -Recurse | Select-Object -First 1
+                Move-Item -Path $nssmSource.FullName -Destination $nssm_exe -Force
+              }
               Remove-Item -Path "D:\nssm\temp" -Recurse -Force
               Remove-Item $nssm_zip -Force
               Write-Host "✅ NSSM downloaded" -ForegroundColor Green
@@ -163,13 +174,11 @@ jobs:
             & $nssm_exe set $serviceName AppStdout "D:\YTdownloadBackend\logs\stdout.log"
             & $nssm_exe set $serviceName AppStderr "D:\YTdownloadBackend\logs\stderr.log"
             
-            # Log rotation settings
             & $nssm_exe set $serviceName AppRotateFiles 1
             & $nssm_exe set $serviceName AppRotateOnline 1
             & $nssm_exe set $serviceName AppRotateSeconds 86400
             & $nssm_exe set $serviceName AppRotateBytes 10485760
             
-            # Service recovery settings
             & $nssm_exe set $serviceName AppExit Default Restart
             & $nssm_exe set $serviceName AppRestartDelay 5000
             
@@ -177,7 +186,7 @@ jobs:
           }
       
       - name: Start service
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "Starting service..." -ForegroundColor Yellow
           Start-Service -Name "YTdownloadBackend"
@@ -189,16 +198,15 @@ jobs:
           if ($service.Status -ne 'Running') {
             Write-Host "❌ Service failed to start!" -ForegroundColor Red
             
-            # Show recent error logs
             if (Test-Path "D:\YTdownloadBackend\logs\stderr.log") {
-              Write-Host "`n--- Error Log ---" -ForegroundColor Red
+              Write-Host "`n--- Last 50 lines of Error Log ---" -ForegroundColor Red
               Get-Content "D:\YTdownloadBackend\logs\stderr.log" -Tail 50
             }
             exit 1
           }
       
       - name: Verify deployment
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "Verifying deployment..." -ForegroundColor Yellow
           $maxAttempts = 20
@@ -235,31 +243,28 @@ jobs:
               Get-Content "D:\YTdownloadBackend\logs\stdout.log" -Tail 30
             }
             
-            # Check Windows Event Log
-            Write-Host "`n--- Recent Application Events ---" -ForegroundColor Yellow
-            Get-EventLog -LogName Application -Source "YTdownloadBackend" -Newest 5 -ErrorAction SilentlyContinue | Format-List
+            Write-Host "`n--- Checking Windows Event Log ---" -ForegroundColor Yellow
+            Get-EventLog -LogName Application -Newest 5 -ErrorAction SilentlyContinue | Where-Object {$_.Source -like "*YT*" -or $_.Source -like "*.NET*"} | Format-List TimeGenerated, Source, Message
             
             exit 1
           }
       
       - name: Security Check
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "`nRunning security checks..." -ForegroundColor Yellow
           
-          # Check if service is running under correct account
           $service = Get-WmiObject Win32_Service | Where-Object {$_.Name -eq "YTdownloadBackend"}
           Write-Host "Service runs as: $($service.StartName)" -ForegroundColor Cyan
           
-          # Check file permissions
           $acl = Get-Acl "D:\YTdownloadBackend"
           Write-Host "`nDirectory Permissions:" -ForegroundColor Cyan
-          $acl.Access | Select-Object IdentityReference, FileSystemRights, AccessControlType | Format-Table
+          $acl.Access | Select-Object IdentityReference, FileSystemRights, AccessControlType | Format-Table -AutoSize
           
           Write-Host "✅ Security check complete" -ForegroundColor Green
       
       - name: Deployment Summary
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "`n========================================" -ForegroundColor Cyan
           Write-Host "   ✅ DEPLOYMENT SUCCESSFUL" -ForegroundColor Green
