@@ -140,84 +140,50 @@ jobs:
         shell: powershell
         run: |
           $serviceName = "YTdownloadBackend"
+          $nssm_exe = "D:\nssm\nssm.exe"
+          
+          # Check if service already exists
           $serviceExists = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
           
           if ($serviceExists) {
             Write-Host "✅ Service already exists, skipping installation" -ForegroundColor Green
           } else {
-            Write-Host "Installing NSSM to D: drive..." -ForegroundColor Yellow
-            New-Item -ItemType Directory -Path "D:\nssm" -Force | Out-Null
-            
-            $nssm_exe = "D:\nssm\nssm.exe"
+            # Verify NSSM is installed
             if (!(Test-Path $nssm_exe)) {
-              Write-Host "Downloading NSSM..." -ForegroundColor Yellow
-              $nssm_zip = "D:\nssm\nssm.zip"
-              
-              # Try multiple sources for NSSM download
-              $nssmUrls = @(
-                "https://github.com/kirillkovalenko/nssm/releases/download/2.24-101-g897c7ad/nssm-2.24-101-g897c7ad.zip",
-                "https://github.com/coreybutler/nssm-mirror/releases/download/2.24/nssm-2.24.zip",
-                "https://nssm.cc/release/nssm-2.24.zip"
-              )
-              
-              $downloaded = $false
-              foreach ($url in $nssmUrls) {
-                try {
-                  Write-Host "Trying: $url" -ForegroundColor Gray
-                  Invoke-WebRequest -Uri $url -OutFile $nssm_zip -TimeoutSec 30
-                  $downloaded = $true
-                  Write-Host "✅ Downloaded from: $url" -ForegroundColor Green
-                  break
-                } catch {
-                  Write-Host "Failed: $url" -ForegroundColor Yellow
-                  continue
-                }
-              }
-              
-              if (!$downloaded) {
-                Write-Host "❌ All NSSM download sources failed!" -ForegroundColor Red
-                Write-Host "Please download NSSM manually from https://nssm.cc/download" -ForegroundColor Yellow
-                exit 1
-              }
-              
-              Expand-Archive -Path $nssm_zip -DestinationPath "D:\nssm\temp" -Force
-              
-              $nssmSource = Get-ChildItem -Path "D:\nssm\temp" -Filter "nssm.exe" -Recurse | Where-Object {$_.Directory.Name -eq "win64"} | Select-Object -First 1
-              if ($nssmSource) {
-                Move-Item -Path $nssmSource.FullName -Destination $nssm_exe -Force
-              } else {
-                $nssmSource = Get-ChildItem -Path "D:\nssm\temp" -Filter "nssm.exe" -Recurse | Select-Object -First 1
-                if ($nssmSource) {
-                  Move-Item -Path $nssmSource.FullName -Destination $nssm_exe -Force
-                } else {
-                  Write-Host "❌ Could not find nssm.exe in downloaded archive!" -ForegroundColor Red
-                  exit 1
-                }
-              }
-              Remove-Item -Path "D:\nssm\temp" -Recurse -Force
-              Remove-Item $nssm_zip -Force
-              Write-Host "✅ NSSM downloaded and extracted" -ForegroundColor Green
-            } else {
-              Write-Host "✅ NSSM already exists, skipping download" -ForegroundColor Green
-            }
-            
-            Write-Host "Creating Windows Service..." -ForegroundColor Yellow
-            & $nssm_exe install $serviceName "D:\YTdownloadBackend\YTdownloadBackend.exe"
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "❌ Failed to install service!" -ForegroundColor Red
+              Write-Host "❌ NSSM not found at D:\nssm\nssm.exe" -ForegroundColor Red
+              Write-Host "Please install NSSM manually and ensure it exists at D:\nssm\nssm.exe" -ForegroundColor Yellow
               exit 1
             }
             
+            Write-Host "✅ NSSM found at: $nssm_exe" -ForegroundColor Green
+            
+            # Verify NSSM version
+            $nssmVersion = & $nssm_exe version 2>&1 | Select-Object -First 2
+            Write-Host "NSSM Version:" -ForegroundColor Cyan
+            $nssmVersion | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+            
+            # Install service
+            Write-Host "`nCreating Windows Service..." -ForegroundColor Yellow
+            & $nssm_exe install $serviceName "D:\YTdownloadBackend\YTdownloadBackend.exe"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "❌ Failed to install service! Exit code: $LASTEXITCODE" -ForegroundColor Red
+              exit 1
+            }
+            
+            # Configure service
+            Write-Host "Configuring service..." -ForegroundColor Yellow
             & $nssm_exe set $serviceName AppDirectory "D:\YTdownloadBackend"
             & $nssm_exe set $serviceName AppEnvironmentExtra "ASPNETCORE_ENVIRONMENT=Production"
             & $nssm_exe set $serviceName AppStdout "D:\YTdownloadBackend\logs\stdout.log"
             & $nssm_exe set $serviceName AppStderr "D:\YTdownloadBackend\logs\stderr.log"
             
+            # Configure log rotation
             & $nssm_exe set $serviceName AppRotateFiles 1
             & $nssm_exe set $serviceName AppRotateOnline 1
             & $nssm_exe set $serviceName AppRotateSeconds 86400
             & $nssm_exe set $serviceName AppRotateBytes 10485760
             
+            # Configure auto-restart
             & $nssm_exe set $serviceName AppExit Default Restart
             & $nssm_exe set $serviceName AppRestartDelay 5000
             
@@ -225,7 +191,10 @@ jobs:
             Write-Host "`nService Configuration:" -ForegroundColor Cyan
             Write-Host "  Executable: D:\YTdownloadBackend\YTdownloadBackend.exe" -ForegroundColor White
             Write-Host "  Working Dir: D:\YTdownloadBackend" -ForegroundColor White
+            Write-Host "  Environment: Production" -ForegroundColor White
             Write-Host "  Logs: D:\YTdownloadBackend\logs\" -ForegroundColor White
+            Write-Host "  Auto-Restart: Enabled (5s delay)" -ForegroundColor White
+            Write-Host "  Log Rotation: 10MB / 24 hours" -ForegroundColor White
           }
       
       - name: Start service
