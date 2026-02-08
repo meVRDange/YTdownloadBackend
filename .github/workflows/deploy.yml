@@ -12,10 +12,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
+      - name: Verify .NET Installation
+        run: |
+          Write-Host "Checking .NET installation..." -ForegroundColor Yellow
+          try {
+            $dotnetVersion = & dotnet --version
+            Write-Host "✅ .NET is installed: $dotnetVersion" -ForegroundColor Green
+            & dotnet --info
+          } catch {
+            Write-Host "❌ .NET is not installed or not in PATH!" -ForegroundColor Red
+            Write-Host "Please install .NET 8.0 SDK or higher from: https://dotnet.microsoft.com/download" -ForegroundColor Yellow
+            exit 1
+          }
       
       - name: Restore dependencies
         run: dotnet restore
@@ -39,9 +47,12 @@ jobs:
         run: |
           $service = Get-Service -Name "YTdownloadBackend" -ErrorAction SilentlyContinue
           if ($service) {
-            Write-Host "Stopping service..."
+            Write-Host "Stopping service..." -ForegroundColor Yellow
             Stop-Service -Name "YTdownloadBackend" -Force
             Start-Sleep -Seconds 3
+            Write-Host "✅ Service stopped" -ForegroundColor Green
+          } else {
+            Write-Host "Service not found, skipping stop step" -ForegroundColor Gray
           }
       
       - name: Deploy files
@@ -49,9 +60,9 @@ jobs:
           $publishPath = ".\publish"
           $deployPath = "C:\YTdownloadBackend"
           
-          Write-Host "Deploying to $deployPath"
+          Write-Host "Deploying to $deployPath" -ForegroundColor Yellow
           Copy-Item -Path "$publishPath\*" -Destination $deployPath -Recurse -Force
-          Write-Host "✅ Files deployed"
+          Write-Host "✅ Files deployed" -ForegroundColor Green
       
       - name: Install Windows Service
         run: |
@@ -59,38 +70,40 @@ jobs:
           $serviceExists = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
           
           if ($serviceExists) {
-            Write-Host "Service already exists, skipping installation"
+            Write-Host "✅ Service already exists, skipping installation" -ForegroundColor Green
           } else {
-            Write-Host "Installing NSSM..."
+            Write-Host "Installing NSSM..." -ForegroundColor Yellow
             New-Item -ItemType Directory -Path "C:\nssm" -Force | Out-Null
             
             $nssm_zip = "C:\nssm\nssm.zip"
             if (!(Test-Path "C:\nssm\nssm.exe")) {
+              Write-Host "Downloading NSSM..." -ForegroundColor Yellow
               Invoke-WebRequest -Uri "https://nssm.cc/download/nssm-2.24-106-g5ba4ba3.zip" -OutFile $nssm_zip
               Expand-Archive -Path $nssm_zip -DestinationPath "C:\nssm" -Force
               Move-Item -Path "C:\nssm\nssm-2.24-106-g5ba4ba3\win64\nssm.exe" -Destination "C:\nssm\nssm.exe" -Force
               Remove-Item -Path "C:\nssm\nssm-2.24-106-g5ba4ba3" -Recurse -Force
+              Remove-Item $nssm_zip -Force
             }
             
-            Write-Host "Creating service..."
+            Write-Host "Creating Windows Service..." -ForegroundColor Yellow
             & C:\nssm\nssm.exe install $serviceName "C:\YTdownloadBackend\YTdownloadBackend.exe"
             & C:\nssm\nssm.exe set $serviceName AppDirectory "C:\YTdownloadBackend"
             & C:\nssm\nssm.exe set $serviceName AppStdout "C:\YTdownloadBackend\logs\stdout.log"
             & C:\nssm\nssm.exe set $serviceName AppStderr "C:\YTdownloadBackend\logs\stderr.log"
-            Write-Host "✅ Service installed"
+            Write-Host "✅ Service installed" -ForegroundColor Green
           }
       
       - name: Start service
         run: |
-          Write-Host "Starting service..."
+          Write-Host "Starting service..." -ForegroundColor Yellow
           Start-Service -Name "YTdownloadBackend"
           Start-Sleep -Seconds 5
           $service = Get-Service -Name "YTdownloadBackend"
-          Write-Host "Service status: $($service.Status)"
+          Write-Host "✅ Service status: $($service.Status)" -ForegroundColor Green
       
       - name: Verify deployment
         run: |
-          Write-Host "Verifying deployment..."
+          Write-Host "Verifying deployment..." -ForegroundColor Yellow
           $maxAttempts = 15
           $attempt = 0
           $success = $false
@@ -99,18 +112,34 @@ jobs:
             try {
               $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -ErrorAction Stop
               if ($response.StatusCode -eq 200) {
-                Write-Host "✅ Service is healthy!"
+                Write-Host "✅ Service is healthy and responding!" -ForegroundColor Green
                 $success = $true
                 break
               }
             } catch {
-              Write-Host "Attempt $($attempt + 1)/$maxAttempts - Waiting for service..."
+              Write-Host "Attempt $($attempt + 1)/$maxAttempts - Waiting for service..." -ForegroundColor Gray
               Start-Sleep -Seconds 2
             }
             $attempt++
           }
           
           if (!$success) {
-            Write-Host "❌ Service verification failed after $maxAttempts attempts"
+            Write-Host "❌ Service verification failed after $maxAttempts attempts" -ForegroundColor Red
+            Write-Host "Checking service logs..." -ForegroundColor Yellow
+            if (Test-Path "C:\YTdownloadBackend\logs\stderr.log") {
+              Write-Host "`n--- Error Log ---" -ForegroundColor Red
+              Get-Content "C:\YTdownloadBackend\logs\stderr.log" -Tail 20
+            }
             exit 1
           }
+      
+      - name: Deployment Summary
+        run: |
+          Write-Host "`n========================================" -ForegroundColor Cyan
+          Write-Host "   DEPLOYMENT SUCCESSFUL" -ForegroundColor Cyan
+          Write-Host "========================================" -ForegroundColor Cyan
+          Write-Host "Service: YTdownloadBackend" -ForegroundColor White
+          Write-Host "Status: Running" -ForegroundColor Green
+          Write-Host "Local URL: http://localhost:5000" -ForegroundColor White
+          Write-Host "Logs: C:\YTdownloadBackend\logs\" -ForegroundColor White
+          Write-Host "========================================`n" -ForegroundColor Cyan
