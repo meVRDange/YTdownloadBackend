@@ -152,7 +152,34 @@ jobs:
             if (!(Test-Path $nssm_exe)) {
               Write-Host "Downloading NSSM..." -ForegroundColor Yellow
               $nssm_zip = "D:\nssm\nssm.zip"
-              Invoke-WebRequest -Uri "https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip" -OutFile $nssm_zip
+              
+              # Try multiple sources for NSSM download
+              $nssmUrls = @(
+                "https://github.com/kirillkovalenko/nssm/releases/download/2.24-101-g897c7ad/nssm-2.24-101-g897c7ad.zip",
+                "https://github.com/coreybutler/nssm-mirror/releases/download/2.24/nssm-2.24.zip",
+                "https://nssm.cc/release/nssm-2.24.zip"
+              )
+              
+              $downloaded = $false
+              foreach ($url in $nssmUrls) {
+                try {
+                  Write-Host "Trying: $url" -ForegroundColor Gray
+                  Invoke-WebRequest -Uri $url -OutFile $nssm_zip -TimeoutSec 30
+                  $downloaded = $true
+                  Write-Host "✅ Downloaded from: $url" -ForegroundColor Green
+                  break
+                } catch {
+                  Write-Host "Failed: $url" -ForegroundColor Yellow
+                  continue
+                }
+              }
+              
+              if (!$downloaded) {
+                Write-Host "❌ All NSSM download sources failed!" -ForegroundColor Red
+                Write-Host "Please download NSSM manually from https://nssm.cc/download" -ForegroundColor Yellow
+                exit 1
+              }
+              
               Expand-Archive -Path $nssm_zip -DestinationPath "D:\nssm\temp" -Force
               
               $nssmSource = Get-ChildItem -Path "D:\nssm\temp" -Filter "nssm.exe" -Recurse | Where-Object {$_.Directory.Name -eq "win64"} | Select-Object -First 1
@@ -160,15 +187,27 @@ jobs:
                 Move-Item -Path $nssmSource.FullName -Destination $nssm_exe -Force
               } else {
                 $nssmSource = Get-ChildItem -Path "D:\nssm\temp" -Filter "nssm.exe" -Recurse | Select-Object -First 1
-                Move-Item -Path $nssmSource.FullName -Destination $nssm_exe -Force
+                if ($nssmSource) {
+                  Move-Item -Path $nssmSource.FullName -Destination $nssm_exe -Force
+                } else {
+                  Write-Host "❌ Could not find nssm.exe in downloaded archive!" -ForegroundColor Red
+                  exit 1
+                }
               }
               Remove-Item -Path "D:\nssm\temp" -Recurse -Force
               Remove-Item $nssm_zip -Force
-              Write-Host "✅ NSSM downloaded" -ForegroundColor Green
+              Write-Host "✅ NSSM downloaded and extracted" -ForegroundColor Green
+            } else {
+              Write-Host "✅ NSSM already exists, skipping download" -ForegroundColor Green
             }
             
             Write-Host "Creating Windows Service..." -ForegroundColor Yellow
             & $nssm_exe install $serviceName "D:\YTdownloadBackend\YTdownloadBackend.exe"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "❌ Failed to install service!" -ForegroundColor Red
+              exit 1
+            }
+            
             & $nssm_exe set $serviceName AppDirectory "D:\YTdownloadBackend"
             & $nssm_exe set $serviceName AppEnvironmentExtra "ASPNETCORE_ENVIRONMENT=Production"
             & $nssm_exe set $serviceName AppStdout "D:\YTdownloadBackend\logs\stdout.log"
@@ -183,6 +222,10 @@ jobs:
             & $nssm_exe set $serviceName AppRestartDelay 5000
             
             Write-Host "✅ Service installed with production settings" -ForegroundColor Green
+            Write-Host "`nService Configuration:" -ForegroundColor Cyan
+            Write-Host "  Executable: D:\YTdownloadBackend\YTdownloadBackend.exe" -ForegroundColor White
+            Write-Host "  Working Dir: D:\YTdownloadBackend" -ForegroundColor White
+            Write-Host "  Logs: D:\YTdownloadBackend\logs\" -ForegroundColor White
           }
       
       - name: Start service
