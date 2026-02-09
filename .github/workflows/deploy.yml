@@ -136,12 +136,13 @@ jobs:
           Write-Host "`nDeployed files:" -ForegroundColor Cyan
           Get-ChildItem -Path $deployPath -File | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
       
-      - name: Install Windows Service with NSSM
+      - name: Install or Verify Windows Service with NSSM
         shell: powershell
-        timeout-minutes: 5
+        timeout-minutes: 2
         run: |
           $serviceName = "YTdownloadBackend"
-          $nssm_exe = "D:\nssm\nssm.exe"
+          $serviceExe = "D:\YTdownloadBackend\YTdownloadBackend.exe"
+          $nssmExe = "D:\nssm\nssm.exe"
           
           # Check if service already exists
           Write-Host "Checking for existing service..." -ForegroundColor Yellow
@@ -151,88 +152,72 @@ jobs:
             Write-Host "✅ Service already exists (Status: $($serviceExists.Status))" -ForegroundColor Green
             Write-Host "Skipping installation..." -ForegroundColor Gray
           } else {
-            Write-Host "Service does not exist, proceeding with installation..." -ForegroundColor Cyan
+            Write-Host "⚠️ Service does not exist, creating with NSSM..." -ForegroundColor Yellow
             
-            # Verify NSSM is installed
-            if (!(Test-Path $nssm_exe)) {
-              Write-Host "❌ NSSM not found at D:\nssm\nssm.exe" -ForegroundColor Red
-              Write-Host "Please install NSSM manually and ensure it exists at D:\nssm\nssm.exe" -ForegroundColor Yellow
+            # Verify NSSM exists
+            if (!(Test-Path $nssmExe)) {
+              Write-Host "❌ NSSM not found at: $nssmExe" -ForegroundColor Red
+              Write-Host "Please install NSSM manually to D:\nssm\nssm.exe" -ForegroundColor Yellow
               exit 1
             }
             
-            Write-Host "✅ NSSM found at: $nssm_exe" -ForegroundColor Green
-            
-            # Kill any stuck NSSM processes first
-            $stuckNssm = Get-Process -Name "nssm" -ErrorAction SilentlyContinue
-            if ($stuckNssm) {
-              Write-Host "⚠️ Found stuck NSSM process, terminating..." -ForegroundColor Yellow
-              Stop-Process -Name "nssm" -Force -ErrorAction SilentlyContinue
-              Start-Sleep -Seconds 2
+            # Verify exe exists
+            if (!(Test-Path $serviceExe)) {
+              Write-Host "❌ Executable not found: $serviceExe" -ForegroundColor Red
+              exit 1
             }
             
-            # Install service with timeout protection
-            Write-Host "`nCreating Windows Service..." -ForegroundColor Yellow
-            $installJob = Start-Job -ScriptBlock {
-              param($nssm, $service, $exe)
-              & $nssm install $service $exe 2>&1
-              return $LASTEXITCODE
-            } -ArgumentList $nssm_exe, $serviceName, "D:\YTdownloadBackend\YTdownloadBackend.exe"
+            Write-Host "✅ NSSM found, installing service..." -ForegroundColor Green
             
-            # Wait for job with 30 second timeout
-            $completed = Wait-Job $installJob -Timeout 30
+            # Install service with NSSM (direct call, no background job)
+            & $nssmExe install $serviceName $serviceExe
             
-            if ($completed) {
-              $exitCode = Receive-Job $installJob
-              Remove-Job $installJob -Force
-              
-              if ($exitCode -ne 0) {
-                Write-Host "❌ Failed to install service! Exit code: $exitCode" -ForegroundColor Red
-                exit 1
-              }
+            if ($LASTEXITCODE -eq 0) {
               Write-Host "✅ Service installed successfully" -ForegroundColor Green
-            } else {
-              Write-Host "❌ Service installation timed out after 30 seconds!" -ForegroundColor Red
-              Stop-Job $installJob -ErrorAction SilentlyContinue
-              Remove-Job $installJob -Force -ErrorAction SilentlyContinue
               
-              # Kill any NSSM processes
-              Stop-Process -Name "nssm" -Force -ErrorAction SilentlyContinue
+              # Configure NSSM settings
+              Write-Host "Configuring NSSM..." -ForegroundColor Cyan
+              
+              # Working directory
+              & $nssmExe set $serviceName AppDirectory "D:\YTdownloadBackend"
+              
+              # Environment
+              & $nssmExe set $serviceName AppEnvironmentExtra "ASPNETCORE_ENVIRONMENT=Production"
+              
+              # Logging
+              & $nssmExe set $serviceName AppStdout "D:\YTdownloadBackend\logs\stdout.log"
+              & $nssmExe set $serviceName AppStderr "D:\YTdownloadBackend\logs\stderr.log"
+              
+              # Log rotation (10MB or 24 hours)
+              & $nssmExe set $serviceName AppRotateFiles 1
+              & $nssmExe set $serviceName AppRotateOnline 1
+              & $nssmExe set $serviceName AppRotateSeconds 86400
+              & $nssmExe set $serviceName AppRotateBytes 10485760
+              
+              # Auto-restart on failure
+              & $nssmExe set $serviceName AppExit Default Restart
+              & $nssmExe set $serviceName AppRestartDelay 5000
+              
+              # Throttle restart attempts
+              & $nssmExe set $serviceName AppThrottle 10000
+              
+              Write-Host "✅ NSSM configuration complete" -ForegroundColor Green
+              Write-Host "`nService Configuration:" -ForegroundColor Cyan
+              Write-Host "  • Executable: D:\YTdownloadBackend\YTdownloadBackend.exe" -ForegroundColor White
+              Write-Host "  • Working Directory: D:\YTdownloadBackend" -ForegroundColor White
+              Write-Host "  • Environment: Production" -ForegroundColor White
+              Write-Host "  • Logs: D:\YTdownloadBackend\logs\" -ForegroundColor White
+              Write-Host "  • Auto-restart: Enabled (5s delay, 10s throttle)" -ForegroundColor White
+              Write-Host "  • Log rotation: 10MB or 24 hours" -ForegroundColor White
+            } else {
+              Write-Host "❌ Failed to install service!" -ForegroundColor Red
+              Write-Host "NSSM Exit Code: $LASTEXITCODE" -ForegroundColor Red
+              Write-Host "`nTroubleshooting:" -ForegroundColor Yellow
+              Write-Host "  1. Ensure GitHub Actions runner runs as LocalSystem" -ForegroundColor White
+              Write-Host "  2. Verify NSSM is at D:\nssm\nssm.exe" -ForegroundColor White
+              Write-Host "  3. Check Windows Event Viewer for errors" -ForegroundColor White
               exit 1
             }
-            
-            # Verify service was created
-            Start-Sleep -Seconds 2
-            $serviceCheck = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-            if (!$serviceCheck) {
-              Write-Host "❌ Service was not created successfully!" -ForegroundColor Red
-              exit 1
-            }
-            
-            # Configure service
-            Write-Host "`nConfiguring service..." -ForegroundColor Yellow
-            & $nssm_exe set $serviceName AppDirectory "D:\YTdownloadBackend"
-            & $nssm_exe set $serviceName AppEnvironmentExtra "ASPNETCORE_ENVIRONMENT=Production"
-            & $nssm_exe set $serviceName AppStdout "D:\YTdownloadBackend\logs\stdout.log"
-            & $nssm_exe set $serviceName AppStderr "D:\YTdownloadBackend\logs\stderr.log"
-            
-            # Configure log rotation
-            & $nssm_exe set $serviceName AppRotateFiles 1
-            & $nssm_exe set $serviceName AppRotateOnline 1
-            & $nssm_exe set $serviceName AppRotateSeconds 86400
-            & $nssm_exe set $serviceName AppRotateBytes 10485760
-            
-            # Configure auto-restart
-            & $nssm_exe set $serviceName AppExit Default Restart
-            & $nssm_exe set $serviceName AppRestartDelay 5000
-            
-            Write-Host "✅ Service configuration complete" -ForegroundColor Green
-            Write-Host "`nService Configuration:" -ForegroundColor Cyan
-            Write-Host "  Executable: D:\YTdownloadBackend\YTdownloadBackend.exe" -ForegroundColor White
-            Write-Host "  Working Dir: D:\YTdownloadBackend" -ForegroundColor White
-            Write-Host "  Environment: Production" -ForegroundColor White
-            Write-Host "  Logs: D:\YTdownloadBackend\logs\" -ForegroundColor White
-            Write-Host "  Auto-Restart: Enabled (5s delay)" -ForegroundColor White
-            Write-Host "  Log Rotation: 10MB / 24 hours" -ForegroundColor White
           }
       
       - name: Start service
