@@ -327,7 +327,7 @@ jobs:
           
           while ($attempt -lt $maxAttempts) {
             try {
-              $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -ErrorAction Stop -TimeoutSec 5
+              $response = Invoke-WebRequest -Uri "https://localhost:5001/health" -ErrorAction Stop -TimeoutSec 5
               if ($response.StatusCode -eq 200) {
                 Write-Host "✅ Service is healthy and responding!" -ForegroundColor Green
                 Write-Host "Response: $($response.Content)" -ForegroundColor Cyan
