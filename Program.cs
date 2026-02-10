@@ -61,7 +61,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 FirebaseApp.Create(new AppOptions()
 {
-    Credential = GoogleCredential.FromFile("Keys\\ytdownloder-7aa70-firebase-adminsdk-fbsvc-565e663998.json")
+    Credential = GoogleCredential.GetApplicationDefault()
 });
 
 
