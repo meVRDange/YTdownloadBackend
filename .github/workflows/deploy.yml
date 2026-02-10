@@ -90,6 +90,11 @@ jobs:
             Write-Host "⚠️ Could not set restrictive permissions (non-fatal)" -ForegroundColor Yellow
             Write-Host "✅ Directories created" -ForegroundColor Green
           }
+          
+          # Verify directories were created
+          Write-Host "`nVerifying directories:" -ForegroundColor Cyan
+          Write-Host "  • App dir: $(Test-Path 'D:\YTdownloadBackend')" -ForegroundColor White
+          Write-Host "  • Logs dir: $(Test-Path 'D:\YTdownloadBackend\logs')" -ForegroundColor White
       
       - name: Stop existing service (if running)
         shell: powershell
@@ -98,12 +103,44 @@ jobs:
           if ($service) {
             Write-Host "Stopping service..." -ForegroundColor Yellow
             Stop-Service -Name "YTdownloadBackend" -Force
-            Start-Sleep -Seconds 5
             
-            Get-Process | Where-Object {$_.Path -like "*YTdownloadBackend*"} | Stop-Process -Force -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
+            Write-Host "Waiting for service to fully stop..." -ForegroundColor Yellow
+            $maxWait = 30
+            $waited = 0
+            while ($waited -lt $maxWait) {
+              $svcStatus = (Get-Service -Name "YTdownloadBackend").Status
+              if ($svcStatus -eq "Stopped") {
+                Write-Host "✅ Service stopped successfully" -ForegroundColor Green
+                break
+              }
+              Start-Sleep -Seconds 1
+              $waited++
+              Write-Host "Waiting... ($waited/$maxWait seconds)" -ForegroundColor Gray
+            }
             
-            Write-Host "✅ Service stopped" -ForegroundColor Green
+            # Kill any lingering processes
+            Write-Host "Checking for lingering processes..." -ForegroundColor Yellow
+            $processes = Get-Process | Where-Object {$_.ProcessName -like "*YTdownload*"}
+            if ($processes) {
+              Write-Host "Found $($processes.Count) lingering process(es), terminating..." -ForegroundColor Yellow
+              $processes | Stop-Process -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 2
+            }
+            
+            # Verify port 5000 is free
+            Write-Host "Checking if port 5000 is free..." -ForegroundColor Yellow
+            $portInUse = Get-NetTCPConnection -LocalPort 5000 -State Listen -ErrorAction SilentlyContinue
+            if ($portInUse) {
+              Write-Host "⚠️ Port 5000 is still in use by PID: $($portInUse.OwningProcess)" -ForegroundColor Yellow
+              $blockingProcess = Get-Process -Id $portInUse.OwningProcess -ErrorAction SilentlyContinue
+              if ($blockingProcess) {
+                Write-Host "Killing process: $($blockingProcess.ProcessName) (PID: $($blockingProcess.Id))" -ForegroundColor Yellow
+                Stop-Process -Id $blockingProcess.Id -Force
+                Start-Sleep -Seconds 3
+              }
+            } else {
+              Write-Host "✅ Port 5000 is free" -ForegroundColor Green
+            }
           } else {
             Write-Host "Service not found, skipping stop step" -ForegroundColor Gray
           }
@@ -224,19 +261,59 @@ jobs:
         shell: powershell
         run: |
           Write-Host "Starting service..." -ForegroundColor Yellow
+          
+          # Verify NSSM logging configuration before starting
+          Write-Host "`nVerifying NSSM logging configuration:" -ForegroundColor Cyan
+          $stdout = & D:\nssm\nssm.exe get YTdownloadBackend AppStdout
+          $stderr = & D:\nssm\nssm.exe get YTdownloadBackend AppStderr
+          Write-Host "  • STDOUT: $stdout" -ForegroundColor White
+          Write-Host "  • STDERR: $stderr" -ForegroundColor White
+          
+          # Check if Firebase key exists
+          $firebaseKey = "D:\YTdownloadBackend\Keys\ytdownloder-7aa70-firebase-adminsdk-fbsvc-565e663998.json"
+          if (Test-Path $firebaseKey) {
+            Write-Host "  • Firebase key: EXISTS" -ForegroundColor Green
+          } else {
+            Write-Host "  • Firebase key: MISSING" -ForegroundColor Red
+          }
+          
           Start-Service -Name "YTdownloadBackend"
           Start-Sleep -Seconds 5
           
           $service = Get-Service -Name "YTdownloadBackend"
-          Write-Host "✅ Service status: $($service.Status)" -ForegroundColor Green
+          Write-Host "`n✅ Service status: $($service.Status)" -ForegroundColor Green
           
           if ($service.Status -ne 'Running') {
             Write-Host "❌ Service failed to start!" -ForegroundColor Red
             
+            # Check if log files exist
+            Write-Host "`nChecking for log files:" -ForegroundColor Yellow
             if (Test-Path "D:\YTdownloadBackend\logs\stderr.log") {
+              Write-Host "✅ stderr.log exists" -ForegroundColor Green
               Write-Host "`n--- Last 50 lines of Error Log ---" -ForegroundColor Red
               Get-Content "D:\YTdownloadBackend\logs\stderr.log" -Tail 50
+            } else {
+              Write-Host "❌ stderr.log does NOT exist!" -ForegroundColor Red
             }
+            
+            if (Test-Path "D:\YTdownloadBackend\logs\stdout.log") {
+              Write-Host "✅ stdout.log exists" -ForegroundColor Green
+              Write-Host "`n--- Last 50 lines of Output Log ---" -ForegroundColor Cyan
+              Get-Content "D:\YTdownloadBackend\logs\stdout.log" -Tail 50
+            } else {
+              Write-Host "❌ stdout.log does NOT exist!" -ForegroundColor Red
+            }
+            
+            # Try to get process info
+            Write-Host "`nChecking for YTdownloadBackend processes:" -ForegroundColor Yellow
+            $proc = Get-Process | Where-Object {$_.ProcessName -like "*YTdownload*"}
+            if ($proc) {
+              Write-Host "⚠️ Process found but service not running:" -ForegroundColor Yellow
+              $proc | Format-Table ProcessName, Id, CPU, WorkingSet
+            } else {
+              Write-Host "❌ No YTdownloadBackend process found" -ForegroundColor Red
+            }
+            
             exit 1
           }
       
