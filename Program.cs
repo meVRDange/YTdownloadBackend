@@ -17,6 +17,7 @@ using YTdownloadBackend.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
+WriteLine("Configuring Swagger with JWT Bearer token support...");
 // Configure Swagger to accept a JWT bearer token
 builder.Services.AddSwaggerGen(c =>
 {
@@ -52,18 +53,23 @@ builder.Services.AddScoped<IYtDlpService, YtDlpService>();
 builder.Services.AddScoped<PlaylistScannerService>();
 builder.Services.AddSingleton<IFcmService, FcmService>();
 
+
 // Register the manually-started download queue service as a singleton so it can be started from endpoints
 builder.Services.AddSingleton<DownloadQueueService>();
+
+writer.WriteLine("Configuring database context...");
 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(
         builder.Configuration.GetConnectionString("DefaultConnection")));
 
+writer.WriteLine("Initializing Firebase Admin SDK...");
 FirebaseApp.Create(new AppOptions()
 {
     Credential = GoogleCredential.GetApplicationDefault()
 });
 
+writer.WriteLine("Firebase Admin SDK initialized with application default credentials.");
 
 // Add CORS policy to allow requests from Angular PWA
 builder.Services.AddCors(options =>
@@ -76,6 +82,7 @@ builder.Services.AddCors(options =>
     });
 });
 
+writer.WriteLine("Configuring JWT authentication...");
 var jwtSecretKey = Environment.GetEnvironmentVariable("JWT_SECRET_KEY")
                   ?? builder.Configuration["Jwt:Secret"]
                   ?? throw new InvalidOperationException("JWT secret key not configured.");
