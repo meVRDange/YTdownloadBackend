@@ -2,10 +2,8 @@
 using Google.Apis.Auth.OAuth2;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
-using Newtonsoft.Json.Linq;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
@@ -17,6 +15,7 @@ using YTdownloadBackend.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddEndpointsApiExplorer();
+
 // Configure Swagger to accept a JWT bearer token
 builder.Services.AddSwaggerGen(c =>
 {
@@ -46,11 +45,20 @@ builder.Services.AddSwaggerGen(c =>
         }
     });
 });
+
+
 builder.Services.AddAuthorization();
 builder.Services.AddHttpClient<IYouTubeService, YouTubeService>();
 builder.Services.AddScoped<IYtDlpService, YtDlpService>();
 builder.Services.AddScoped<PlaylistScannerService>();
 builder.Services.AddSingleton<IFcmService, FcmService>();
+
+// Load FCM token from configuration (appsettings) or environment variable.
+// This token is used for sending Firebase Cloud Messaging notifications.
+var fcmToken = builder.Configuration["Firebase:FCMToken"] ?? Environment.GetEnvironmentVariable("FIREBASE_FCM_TOKEN");
+
+// Register authorization service for endpoint injection
+builder.Services.AddScoped<IAuthorizationService, AuthorizationService>();
 
 // Register the manually-started download queue service as a singleton so it can be started from endpoints
 builder.Services.AddSingleton<DownloadQueueService>();
@@ -138,36 +146,43 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = Dat
     .AllowAnonymous();
 
 
-app.MapGet("/api/helthCheck", async (ILogger<Program> logger, HttpContext http, IFcmService fcmService) =>
+// Updated health‑check endpoint with robust error handling and corrected naming.
+app.MapGet("/api/healthCheck", async (ILogger<Program> logger, HttpContext http, IFcmService fcmService) =>
 {
-    // Try to get the JWT token from the Authorization header
-    var authHeader = http.Request.Headers["Authorization"].FirstOrDefault();
-    string? jwtToken = null;
-    if (!string.IsNullOrEmpty(authHeader) && authHeader.StartsWith("Bearer "))
+    // JWT authentication is enforced by the middleware; at this point the user is authenticated.
+    var payload = new Dictionary<string, string>
     {
-        jwtToken = authHeader.Substring("Bearer ".Length).Trim();
-        logger.LogInformation("Health check called. JWT token: {JwtToken}", jwtToken);
-    }
-    else
-    {
-        logger.LogInformation("Health check called. No JWT token found in Authorization header.");
-    }
-
-    var payload = new Dictionary<string, string>{
-        {"type","DOWNLOAD_SONG"},
-        {"songId","123"},
-        {"downloadUrl","https://your-backend/api/download/file/123"},
-        {"title","My Song"}
+        {"type", "DOWNLOAD_SONG"},
+        {"songId", "123"},
+        {"downloadUrl", "https://your-backend/api/download/file/123"},
+        {"title", "My Song"}
     };
-    string? messageId = await fcmService.SendDownloadNotificationAsync("da9vrVolSOiYsd0Scb0JVi:APA91bFcBE-HbbvLKkt1Jpu0ktcbv2M_alOim83MqRNg9mXwsANaBM9SyqBJt3amxcchsx0AHYJ9wA_YzWYyma7aCzLWDJC24bVy6MRHRJGY-oJRM4dq-DY", payload);
 
-    return Results.Ok(new
+    if (string.IsNullOrWhiteSpace(fcmToken))
     {
-        message = "Authinticad",
-    });
+        logger.LogError("FCM token not configured. Cannot send notification.");
+        return Results.Problem("FCM token not configured.");
+    }
+
+    try
+    {
+        string? messageId = await fcmService.SendDownloadNotificationAsync(fcmToken, payload);
+        // Serialize manually to avoid PipeWriter issues in .NET 10.
+        var json = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            message = "Authenticated",
+            fcmMessageId = messageId
+        });
+        return Results.Text(json, "application/json");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Failed to send FCM notification during health check.");
+        return Results.Problem("Failed to send notification.");
+    }
 })
-.RequireAuthorization()
-.WithName("helthCheck");
+    .RequireAuthorization()
+    .WithName("healthCheck");
 
 
 app.MapGet("/api/uploadTest", async (ILogger<Program> logger, HttpContext http, IFcmService fcmService, AppDbContext db, ISongUploadService uploadService) =>
@@ -193,113 +208,123 @@ app.MapGet("/api/uploadTest", async (ILogger<Program> logger, HttpContext http, 
 .RequireAuthorization()
 .WithName("uploadTest");
 
-app.MapPost("/api/savePlaylist", async (PlaylistRequest request, AppDbContext db, HttpContext http, IYouTubeService ytService, ILogger<Program> logger) =>
+app.MapPost("/api/savePlaylist", async (PlaylistRequest request, AppDbContext db, HttpContext http, IYouTubeService ytService, ILogger<Program> logger, IAuthorizationService AuthService) =>
 {
-    var username = http.User.Identity?.Name;
-    logger.LogInformation("savePlaylist called by user: {Username}", username);
-
-    if (username is null)
+    try
     {
-        logger.LogWarning("Unauthorized access attempt to savePlaylist.");
-        return Results.Unauthorized();
-    }
-
-    var user = await db.Users.FirstOrDefaultAsync(u => u.Username == username);
-    if (user is null)
-    {
-        logger.LogWarning("User not found in DB: {Username}", username);
-        return Results.Unauthorized();
-    }
-
-    logger.LogInformation("User found: {Username} (Id: {UserId})", user.Username, user.Id);
-
-    var existing = await db.Playlists.FirstOrDefaultAsync(p => p.UserId == user.Id);
-    logger.LogInformation("Received playlist URL: {PlaylistUrl}", request.PlaylistUrl);
-
-    var match = Regex.Match(request.PlaylistUrl, @"[?&]list=([^&]+)");
-    if (!match.Success)
-    {
-        logger.LogWarning("Invalid playlist URL: {PlaylistUrl}", request.PlaylistUrl);
-        return Results.BadRequest("Invalid playlist URL");
-    }
-
-    string playlistId = match.Groups[1].Value;
-    logger.LogInformation("Extracted playlistId: {PlaylistId}", playlistId);
-
-    var playlistTitle = !string.IsNullOrWhiteSpace(request.CustomName)
-        ? request.CustomName
-        : await ytService.GetPlaylistTitleAsync(playlistId)
-            ?? $"Playlist_{DateTime.UtcNow:yyyyMMddHHmmss}";
-
-    logger.LogInformation("Playlist title resolved: {PlaylistTitle}", playlistTitle);
-
-    if (existing != null)
-    {
-        logger.LogInformation("User already has a playlist saved: {ExistingPlaylistId}", existing.PlaylistId);
-
-        if (existing.PlaylistId == playlistId)
+        User user;
+        try
         {
-            logger.LogInformation("Playlist already exists for user: {Username}", username);
-            return Results.Ok(new
-            {
-                message = $"✅ You already have this playlist saved: {playlistTitle}"
-            });
+            user = await AuthService.CommonAuthCheck(http, db, logger);
         }
-        else
+        catch (UnauthorizedAccessException ex)
         {
-            logger.LogInformation("Replacing existing playlist {OldPlaylistId} with new {NewPlaylistId}", existing.PlaylistId, playlistId);
-            db.Playlists.Remove(existing);
-
-            db.Playlists.Add(new Playlist
-            {
-                PlaylistId = playlistId,
-                PlaylistTitle = playlistTitle,
-                UserId = user.Id
-            });
-
-            await db.SaveChangesAsync();
-
-            logger.LogInformation("Existing playlist replaced for user: {Username}", username);
-            return Results.Ok(new
-            {
-                message = $"♻️ Existing playlist replaced with: {playlistTitle}"
-            });
+            return Results.Unauthorized();
         }
+
+        if (string.IsNullOrWhiteSpace(request.PlaylistUrl))
+        {
+            logger.LogWarning("Empty playlist URL provided by user: {Username}", user.Username);
+            return Results.BadRequest("Playlist URL cannot be empty");
+        }
+
+        logger.LogInformation("Received playlist URL: {PlaylistUrl}", request?.PlaylistUrl);
+        logger.LogInformation("savePlaylist called by user: {Username} (Id: {UserId})", user.Username, user.Id);
+
+        var existing = await db.Playlists.FirstOrDefaultAsync(p => p.UserId == user.Id);
+
+        var match = Regex.Match(request.PlaylistUrl, @"[?&]list=([^&]+)");
+        if (!match.Success)
+        {
+            logger.LogWarning("Invalid playlist URL: {PlaylistUrl}", request.PlaylistUrl);
+            return Results.BadRequest("Invalid playlist URL");
+        }
+
+        string playlistId = match.Groups[1].Value;
+        logger.LogInformation("Extracted playlistId: {PlaylistId}", playlistId);
+
+        var playlistTitle = !string.IsNullOrWhiteSpace(request.CustomName)
+            ? request.CustomName
+            : await ytService.GetPlaylistTitleAsync(playlistId)
+                ?? $"Playlist_{DateTime.UtcNow:yyyyMMddHHmmss}";
+
+        logger.LogInformation("Playlist title resolved: {PlaylistTitle}", playlistTitle);
+
+        if (existing != null)
+        {
+            logger.LogInformation("User already has a playlist saved: {ExistingPlaylistId}", existing.PlaylistId);
+
+            if (existing.PlaylistId == playlistId)
+            {
+                logger.LogInformation("Playlist already exists for user: {Username}", user.Username);
+                return Results.Ok(new
+                {
+                    message = $"✅ You already have this playlist saved: {playlistTitle}"
+                });
+            }
+            else
+            {
+                logger.LogInformation("Replacing existing playlist {OldPlaylistId} with new {NewPlaylistId}", existing.PlaylistId, playlistId);
+                db.Playlists.Remove(existing);
+
+                db.Playlists.Add(new Playlist
+                {
+                    PlaylistId = playlistId,
+                    PlaylistTitle = playlistTitle,
+                    UserId = user.Id
+                });
+
+                await db.SaveChangesAsync();
+
+                logger.LogInformation("Existing playlist replaced for user: {Username}", user.Username);
+                return Results.Ok(new
+                {
+                    message = $"♻️ Existing playlist replaced with: {playlistTitle}"
+                });
+            }
+        }
+
+        //  Save playlist to database
+        var playlist = new Playlist
+        {
+            User = user,
+            PlaylistId = playlistId,
+            PlaylistTitle = playlistTitle,
+        };
+
+        db.Playlists.Add(playlist);
+        await db.SaveChangesAsync();
+
+        logger.LogInformation("New playlist saved for user: {Username}, PlaylistId: {PlaylistId}, Title: {PlaylistTitle}", user.Username, playlistId, playlistTitle);
+
+        return Results.Ok(new
+        {
+            message = "Playlist saved successfully",
+            playlistId = playlist.Id,
+            playlistTitle = playlist.PlaylistTitle
+        });
     }
-
-    //  Save playlist to database
-    var playlist = new Playlist
+    catch (Exception ex)
     {
-        User = user,
-        PlaylistId = playlistId,
-        PlaylistTitle = playlistTitle,
-    };
-
-    db.Playlists.Add(playlist);
-    await db.SaveChangesAsync();
-
-    logger.LogInformation("New playlist saved for user: {Username}, PlaylistId: {PlaylistId}, Title: {PlaylistTitle}", username, playlistId, playlistTitle);
-
-    return Results.Ok(new
-    {
-        message = "Playlist saved successfully",
-        playlistId = playlist.Id,
-        playlistTitle = playlist.PlaylistTitle
-    });
+        logger.LogError(ex, "Error in savePlaylist endpoint");
+                return Results.Problem(statusCode: 500, title: "Internal Server Error", detail: "An error occurred while saving the playlist");
+    }
 })
 .RequireAuthorization()
 .WithOpenApi();
 
 
-app.MapGet("/api/getPlaylist", async (AppDbContext db, HttpContext http) =>
+app.MapGet("/api/getPlaylist", async (AppDbContext db, HttpContext http, IAuthorizationService AuthService, ILogger<Program> logger) =>
 {
-    var username = http.User.Identity?.Name;
-    if (username is null)
+    User user;
+    try
+    {
+        user = await AuthService.CommonAuthCheck(http, db, logger);
+    }
+    catch (UnauthorizedAccessException ex)
+    {
         return Results.Unauthorized();
-
-    var user = await db.Users.FirstOrDefaultAsync(u => u.Username == username);
-    if (user is null)
-        return Results.Unauthorized();
+    }
 
     var playlist = await db.Playlists
         .Where(p => p.UserId == user.Id)

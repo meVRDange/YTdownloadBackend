@@ -1,9 +1,15 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!-- Target stable .NET 8 for compatibility with test project -->
+    <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>ytdownload-backend-2026</UserSecretsId>
+    <!-- Disable auto-generated assembly attributes to avoid duplicate TargetFrameworkAttribute -->
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <!-- Disable generation of TargetFrameworkAttribute to avoid duplicate -->
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
   </PropertyGroup>
 
   <ItemGroup>
