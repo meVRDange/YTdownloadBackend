@@ -94,7 +94,11 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAngularPWA", policy =>
     {
-        policy.WithOrigins("http://localhost:4200", "https://localhost", "https://192.168.29.110")
+        policy.WithOrigins(
+            "http://localhost:4200",
+            "https://vdange.site",
+            "https://www.vdange.site",
+            "https://192.168.29.110")
               .AllowAnyHeader()
               .AllowAnyMethod();
     });
