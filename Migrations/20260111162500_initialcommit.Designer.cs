@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using YTdownloadBackend.Data;
 
@@ -11,13 +12,15 @@ using YTdownloadBackend.Data;
 namespace YTdownloadBackend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260111162500_initialcommit")]
+    partial class initialcommit
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "8.0.28")
+                .HasAnnotation("ProductVersion", "8.0.22")
                 .HasAnnotation("Relational:MaxIdentifierLength", 128);
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
@@ -55,9 +58,6 @@ namespace YTdownloadBackend.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
 
-                    b.Property<string>("DownloadUrl")
-                        .HasColumnType("nvarchar(max)");
-
                     b.Property<DateTime?>("DownloadUrlExpiry")
                         .HasColumnType("datetime2");
 
@@ -66,6 +66,12 @@ namespace YTdownloadBackend.Migrations
 
                     b.Property<long?>("DurationSeconds")
                         .HasColumnType("bigint");
+
+                    b.Property<string>("FirebaseDownloadUrl")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("FirebaseStoragePath")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<DateTime>("LastChecked")
                         .HasColumnType("datetime2");
@@ -82,9 +88,6 @@ namespace YTdownloadBackend.Migrations
 
                     b.Property<int>("Status")
                         .HasColumnType("int");
-
-                    b.Property<string>("StoragePath")
-                        .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("ThumbnailUrl")
                         .HasColumnType("nvarchar(max)");
