@@ -1,32 +1,33 @@
 ﻿using YTdownloadBackend.Data;
 using YTdownloadBackend.Models;
+using YTdownloadBackend.Services.Storage;
 
 namespace YTdownloadBackend.Services
 {
     public interface ISongUploadService
     {
         /// <summary>
-        /// Orchestrates: Upload to Firebase → Generate download URL → Send FCM → Clean local file
+        /// Orchestrates: Upload to storage → Generate download URL → Send FCM → Clean local file
         /// </summary>
         Task<bool> ProcessDownloadedSongAsync(PlaylistSong song, string localFilePath, string username, User user);
     }
 
     public class SongUploadService : ISongUploadService
     {
-        private readonly IFirebaseStorageService _storageService;
-        private readonly IFirebaseUrlService _urlService;
+        private readonly IStorageProviderFactory _storageFactory;
+        private readonly IDownloadUrlService _urlService;
         private readonly IFcmService _fcmService;
         private readonly AppDbContext _dbContext;
         private readonly ILogger<SongUploadService> _logger;
 
         public SongUploadService(
-            IFirebaseStorageService storageService,
-            IFirebaseUrlService urlService,
+            IStorageProviderFactory storageFactory,
+            IDownloadUrlService urlService,
             IFcmService fcmService,
             AppDbContext dbContext,
             ILogger<SongUploadService> logger)
         {
-            _storageService = storageService ?? throw new ArgumentNullException(nameof(storageService));
+            _storageFactory = storageFactory ?? throw new ArgumentNullException(nameof(storageFactory));
             _urlService = urlService ?? throw new ArgumentNullException(nameof(urlService));
             _fcmService = fcmService ?? throw new ArgumentNullException(nameof(fcmService));
             _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
@@ -51,42 +52,42 @@ namespace YTdownloadBackend.Services
                     return false;
                 }
 
-                // STEP 2: Generate Firebase Storage path
+                // STEP 2: Generate storage path (provider-agnostic)
                 var fileName = Path.GetFileName(localFilePath);
-                var firebaseStoragePath = $"users/{user.Id}/songs/{fileName}";
+                var storagePath = $"users/{user.Id}/songs/{fileName}";
 
-                _logger.LogInformation("Starting Firebase Storage upload for song {SongId}: {LocalPath} -> {StoragePath}",
-                    song.Id, localFilePath, firebaseStoragePath);
+                _logger.LogInformation("Starting storage upload for song {SongId}: {LocalPath} -> {StoragePath}",
+                    song.Id, localFilePath, storagePath);
 
                 var uploadedPath = string.Empty;
-                
-                // STEP 3: Check if file already exists in Firebase Storage
-                var fileExists = await _storageService.FileExistsAsync(firebaseStoragePath);
+                var storageProvider = _storageFactory.GetActiveProvider();
+
+                // STEP 3: Check if file already exists in storage
+                var fileExists = await storageProvider.FileExistsAsync(storagePath);
                 if (fileExists)
                 {
-                    _logger.LogInformation("File already exists in Firebase Storage: {StoragePath}, skipping upload", firebaseStoragePath);
-                    uploadedPath = firebaseStoragePath;
+                    _logger.LogInformation("File already exists in storage: {StoragePath}, skipping upload", storagePath);
+                    uploadedPath = storagePath;
                 }
                 else
                 {
-                    // STEP 3: Upload to Firebase Storage
+                    // STEP 3: Upload to storage
                     try
                     {
-                        uploadedPath = await _storageService.UploadFileAsync(localFilePath, firebaseStoragePath);
+                        uploadedPath = await storageProvider.UploadFileAsync(localFilePath, storagePath);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError("Firebase Storage upload failed for song {SongId}", ex.Message);
-                        throw ex;
+                        _logger.LogError("Storage upload failed for song {SongId}: {Message}", song.Id, ex.Message);
+                        throw;
                     }
                 }
                 if (string.IsNullOrEmpty(uploadedPath))
                 {
-                    _logger.LogError("Firebase Storage upload returned null path for song {SongId}", song.Id);
+                    _logger.LogError("Storage upload returned null path for song {SongId}", song.Id);
                     return false;
                 }
-                song.FirebaseStoragePath = uploadedPath;
-                song.DownloadUrlExpiry = DateTime.UtcNow.AddHours(48);
+                song.StoragePath = uploadedPath;
 
                 // STEP 4: Generate download URL (valid for 48 hours)
                 var downloadUrl = await _urlService.GetOrGenerateDownloadUrlAsync(song, TimeSpan.FromHours(48));
@@ -96,16 +97,15 @@ namespace YTdownloadBackend.Services
                     return false;
                 }
 
-                // STEP 5: Update song record with Firebase Storage info
-                song.FirebaseStoragePath = uploadedPath;
-                song.FirebaseDownloadUrl = downloadUrl;
-                song.DownloadUrlExpiry = DateTime.UtcNow.AddHours(48);
+                // STEP 5: Update song record with storage info
+                song.StoragePath = uploadedPath;
+                song.DownloadUrl = downloadUrl;
                 song.Status = PlaylistSongStatus.Completed;
                 song.DownloadedAt = DateTime.UtcNow;
 
                 await _dbContext.SaveChangesAsync();
 
-                _logger.LogInformation("Song {SongId} uploaded to Firebase Storage and database updated", song.Id);
+                _logger.LogInformation("Song {SongId} uploaded to storage and database updated", song.Id);
 
                 // STEP 6: Send FCM notification with download link (if user has FCM token)
                 if (!string.IsNullOrEmpty(user.FCMToken))

@@ -6,7 +6,7 @@ namespace YTdownloadBackend.Services
 {
     // A manually-started queue processor. It polls the DownloadTasks table and processes
     // pending tasks until there are none left. It is intentionally NOT registered as
-    // a hosted service — callers must start it with StartIfNotRunningAsync.
+    // a hosted service ï¿½ callers must start it with StartIfNotRunningAsync.
     public class DownloadQueueService
     {
         private readonly IServiceProvider _services;
@@ -43,7 +43,7 @@ namespace YTdownloadBackend.Services
             {
                 if (_running)
                 {
-                    _logger.LogDebug("DownloadQueueService already running — start request ignored.");
+                    _logger.LogDebug("DownloadQueueService already running ï¿½ start request ignored.");
                     return;
                 }
 
@@ -108,8 +108,8 @@ namespace YTdownloadBackend.Services
 
                             if ( File.Exists(expectedPath))
                             {
-                                // Download successful, now upload to Firebase
-                                scopedLogger.LogInformation("Download completed for VideoId={VideoId}, attempting Firebase upload", taskItem.VideoId);
+                                // Download successful, now upload to storage
+                                scopedLogger.LogInformation("Download completed for VideoId={VideoId}, attempting storage upload", taskItem.VideoId);
                                 
                                 try
                                 {
@@ -120,7 +120,7 @@ namespace YTdownloadBackend.Services
                                         if (uploadSuccess)
                                         {
                                             taskItem.Status = PlaylistSongStatus.Completed;
-                                            scopedLogger.LogInformation("Song {SongId} successfully uploaded to Firebase", taskItem.Id);
+                                            scopedLogger.LogInformation("Song {SongId} successfully uploaded to storage", taskItem.Id);
                                         }
                                         else
                                         {
@@ -128,24 +128,24 @@ namespace YTdownloadBackend.Services
                                             if (taskItem.RetryCount >= 3)
                                             {
                                                 taskItem.Status = PlaylistSongStatus.Failed;
-                                                scopedLogger.LogWarning("Firebase upload permanently failed for SongId={SongId} after {Retries} attempts", taskItem.Id, taskItem.RetryCount);
+                                                scopedLogger.LogWarning("Storage upload permanently failed for SongId={SongId} after {Retries} attempts", taskItem.Id, taskItem.RetryCount);
                                             }
                                             else
                                             {
                                                 taskItem.Status = PlaylistSongStatus.Pending; // requeue
-                                                scopedLogger.LogWarning("Firebase upload failed for SongId={SongId}. Will retry (attempt {Attempt}).", taskItem.Id, taskItem.RetryCount);
+                                                scopedLogger.LogWarning("Storage upload failed for SongId={SongId}. Will retry (attempt {Attempt}).", taskItem.Id, taskItem.RetryCount);
                                             }
                                         }
                                     }
                                     else
                                     {
-                                        scopedLogger.LogError("User {Username} not found. Cannot upload to Firebase for SongId={SongId}", username, taskItem.Id);
+                                        scopedLogger.LogError("User {Username} not found. Cannot upload to storage for SongId={SongId}", username, taskItem.Id);
                                         taskItem.Status = PlaylistSongStatus.Failed;
                                     }
                                 }
                                 catch (Exception ex)
                                 {
-                                    scopedLogger.LogError(ex, "Exception during Firebase upload for SongId={SongId}", taskItem.Id);
+                                    scopedLogger.LogError(ex, "Exception during storage upload for SongId={SongId}", taskItem.Id);
                                     taskItem.RetryCount = Math.Min(taskItem.RetryCount + 1, int.MaxValue);
                                     if (taskItem.RetryCount >= 3)
                                     {

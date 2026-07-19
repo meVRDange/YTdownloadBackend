@@ -25,10 +25,10 @@
             public DateTime? DownloadedAt { get; set; }
             public DateTime LastChecked { get; set; } = DateTime.UtcNow;
 
-            // Firebase Storage information
-            public string? FirebaseStoragePath { get; set; }  // e.g., "users/123/songs/song-title.mp3"
-            public string? FirebaseDownloadUrl { get; set; }  // Direct download URL
-            public DateTime? DownloadUrlExpiry { get; set; }  // When the download URL was generated
+            // Storage information (provider-agnostic)
+            public string? StoragePath { get; set; }      // e.g., "users/123/songs/song-title.mp3"
+            public string? DownloadUrl { get; set; }      // Direct download URL
+            public DateTime? DownloadUrlExpiry { get; set; }  // When the download URL expires
         }
     
         public enum PlaylistSongStatus
