@@ -75,7 +75,7 @@ namespace YTdownloadBackend.Services
                         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
                         var downloader = scope.ServiceProvider.GetRequiredService<IYtDlpService>();
                         var scopedLogger = scope.ServiceProvider.GetRequiredService<ILogger<DownloadQueueService>>();
-                        var uploadService = scope.ServiceProvider.GetRequiredService<ISongUploadService>();
+                        var pipeline = scope.ServiceProvider.GetRequiredService<ISongPipeline>();
 
                         List<PlaylistSong>? taskItemList = await repositoryService.getPlaylistPendingSongs();
 
@@ -89,7 +89,7 @@ namespace YTdownloadBackend.Services
                         foreach (var taskItem in taskItemList)
                         {
                             
-                            repositoryService.UpdatePlaylistSongStatus(taskItem, PlaylistSongStatus.Processing);
+                            await repositoryService.UpdatePlaylistSongStatus(taskItem, PlaylistSongStatus.Processing);
 
                             scopedLogger.LogInformation($"Processing download task: VideoTitle={taskItem.Title}, VideoId={taskItem.VideoId}");
 
@@ -116,7 +116,7 @@ namespace YTdownloadBackend.Services
                                     var user = await db.Users.FirstOrDefaultAsync(u => u.Username == username);
                                     if (user != null)
                                     {
-                                        bool uploadSuccess = await uploadService.ProcessDownloadedSongAsync(taskItem, expectedPath, username, user);
+                                        bool uploadSuccess = await pipeline.ProcessAsync(taskItem, expectedPath, username, user);
                                         if (uploadSuccess)
                                         {
                                             taskItem.Status = PlaylistSongStatus.Completed;

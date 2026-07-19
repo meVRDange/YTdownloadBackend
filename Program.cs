@@ -58,21 +58,16 @@ builder.Services.AddSingleton<IFcmService, FcmService>();
 builder.Services.AddScoped<IAuthorizationService, AuthorizationService>();
 // Register the manually-started download queue service as a singleton so it can be started from endpoints
 builder.Services.AddSingleton<DownloadQueueService>();
-builder.Services.AddScoped<ISongUploadService, SongUploadService>();
+builder.Services.AddScoped<ISongPipeline, SongPipeline>();
 
 // Configure storage provider options from the "Storage" config section
 builder.Services.Configure<StorageProviderOptions>(builder.Configuration.GetSection("Storage"));
 
-// Register storage provider, factory, and download URL service
+// Register storage provider and factory
 builder.Services.AddSingleton<IStorageProvider, FirebaseStorageProvider>();
 builder.Services.AddSingleton<IStorageProviderFactory, StorageProviderFactory>();
-builder.Services.AddScoped<IDownloadUrlService, DownloadUrlService>();
 
 
-// Load FCM token from configuration (appsettings) or environment variable.
-// This token is used for sending Firebase Cloud Messaging notifications.
-var fcmToken = builder.Configuration["Firebase:FCMToken"] ?? Environment.GetEnvironmentVariable("FIREBASE_FCM_TOKEN");
- 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(
         builder.Configuration.GetConnectionString("DefaultConnection")));
@@ -218,73 +213,6 @@ app.MapGet("/health",
     .AllowAnonymous();
 
 
-// Updated health‑check endpoint with robust error handling and corrected naming.
-app.MapGet("/api/healthCheck", async (ILogger<Program> logger, HttpContext http, IFcmService fcmService) =>
-{
-    // JWT authentication is enforced by the middleware; at this point the user is authenticated.
-    var payload = new Dictionary<string, string>
-    {
-        {"type", "DOWNLOAD_SONG"},
-        {"songId", "123"},
-        {"downloadUrl", "https://your-backend/api/download/file/123"},
-        {"title", "My Song"}
-    };
-
-    if (string.IsNullOrWhiteSpace(fcmToken))
-    {
-        logger.LogError("FCM token not configured. Cannot send notification.");
-        return Results.Problem("FCM token not configured.");
-    }
-
-    try
-    {
-        string? messageId = await fcmService.SendDownloadNotificationAsync(fcmToken, payload);
-        // Serialize manually to avoid PipeWriter issues in .NET 10.
-        var json = System.Text.Json.JsonSerializer.Serialize(new
-        {
-            message = "Authenticated",
-            fcmMessageId = messageId
-        });
-        return Results.Text(json, "application/json");
-    }
-    catch (Exception ex)
-    {
-        logger.LogError(ex, "Failed to send FCM notification during health check.");
-        return Results.Problem("Failed to send notification.");
-    }
-})
-.RequireAuthorization()
-.WithName("healthCheck");
-
-
-app.MapGet("/api/uploadTest", async (ILogger<Program> logger, HttpContext http, IFcmService fcmService, AppDbContext db, ISongUploadService uploadService) =>
-{
-    var username = http.User.Identity?.Name;
-    logger.LogInformation("savePlaylist called by user: {Username}", username);
-
-    if (username is null)
-    {
-        logger.LogWarning("Unauthorized access attempt to savePlaylist.");
-        return Results.Unauthorized();
-    }
-
-    User? user = await db.Users.FirstOrDefaultAsync(u => u.Username == username);
-    if (user is null)
-    {
-        logger.LogWarning("User not found for username: {Username}", username);
-        return Results.NotFound("User not found");
-    }
-    PlaylistSong playlistSong= new PlaylistSong { PlaylistId = "TEST_PLAYLIST", VideoId = "TEST_VIDEO", Title = "Test Song" };
-    string expectedPath = Path.Combine(Directory.GetCurrentDirectory(), "downloads","sa", "august.mp3");
-    bool uploadSuccess = await uploadService.ProcessDownloadedSongAsync(playlistSong, expectedPath, username, user);
-    return Results.Ok(new
-    {
-        message = "Authinticad",
-    });
-})
-.RequireAuthorization()
-.WithName("uploadTest"); 
-
 app.MapPost("/api/savePlaylist", async (PlaylistRequest request, AppDbContext db, HttpContext http, IYouTubeService ytService, ILogger<Program> logger, IAuthorizationService AuthService) =>
 {
     if (request is null) return Results.BadRequest("Request body is required.");
@@ -420,37 +348,63 @@ app.MapGet("/api/getPlaylist", async (AppDbContext db, HttpContext http, IAuthor
 .RequireAuthorization()
 .WithOpenApi();
 
-app.MapGet("/api/getSongs", async (HttpContext http, ILogger<Program> logger, AppDbContext db,PlaylistScannerService scanner, DownloadQueueService queueService) =>
+app.MapPost("/api/sync", async (AppDbContext db, HttpContext http, IAuthorizationService AuthService, ILogger<Program> logger, PlaylistScannerService scanner, DownloadQueueService queueService) =>
 {
-    var username = http.User.Identity?.Name;
-    if (username is null)
+    User user;
+    try
     {
-        logger.LogWarning("Unauthorized access to playlist songs");
+        user = await AuthService.CommonAuthCheck(http, db, logger);
+    }
+    catch (UnauthorizedAccessException)
+    {
         return Results.Unauthorized();
     }
 
-    logger.LogInformation("Fetching songs for user {Username}", username);
-
-
-    // Get the user from the database
-    var user = await db.Users.FirstOrDefaultAsync(u => u.Username == username);
-    if (user is null)
+    var playlist = await db.Playlists.FirstOrDefaultAsync(p => p.UserId == user.Id);
+    if (playlist is null)
     {
-        logger.LogWarning("User not found in DB: {Username}", username);
+        return Results.NotFound(new { message = "No playlist saved yet" });
+    }
+
+    logger.LogInformation("Syncing playlist {PlaylistId} for user {Username}", playlist.PlaylistId, user.Username);
+
+    // Step 1: Scan YouTube for new songs
+    await scanner.ScanForNewAddedSongsAsync(playlist.PlaylistId, user.Username);
+
+    // Step 2: Start the download queue to process any pending songs
+    if (!queueService.IsRunning)
+    {
+        queueService.StartIfNotRunning(user.Username);
+        logger.LogInformation("Download queue started for user {Username}", user.Username);
+    }
+
+    return Results.Ok(new { message = "Sync started", playlistId = playlist.PlaylistId });
+})
+.RequireAuthorization()
+.WithOpenApi();
+
+app.MapGet("/api/getSongs", async (HttpContext http, ILogger<Program> logger, AppDbContext db, IAuthorizationService AuthService) =>
+{
+    User user;
+    try
+    {
+        user = await AuthService.CommonAuthCheck(http, db, logger);
+    }
+    catch (UnauthorizedAccessException)
+    {
         return Results.Unauthorized();
     }
+
+    logger.LogInformation("Fetching songs for user {Username}", user.Username);
 
     // Get the user's playlist
     var playlist = await db.Playlists.FirstOrDefaultAsync(p => p.UserId == user.Id);
     if (playlist is null)
     {
-        logger.LogInformation("No playlist found for user {Username}", username);
+        logger.LogInformation("No playlist found for user {Username}", user.Username);
         return Results.Ok(new { songs = new List<object>(), message = "No playlist saved yet" });
     }
-    logger.LogInformation("Found playlist {PlaylistId} for user {Username}", playlist.PlaylistId, username);
-
-    await scanner.ScanForNewAddedSongsAsync(playlist.PlaylistId, username);
-
+    logger.LogInformation("Found playlist {PlaylistId} for user {Username}", playlist.PlaylistId, user.Username);
 
     // Get all songs for the user's playlist
     var songs = await db.PlaylistSongs
@@ -466,31 +420,30 @@ app.MapGet("/api/getSongs", async (HttpContext http, ILogger<Program> logger, Ap
         })
         .ToListAsync();
 
-    // Start the download queue service if it's not running
-    //if (!queueService.IsRunning && songs.Count > 0)
-    //{
-    //    // Start the worker using the first song id as the trigger. The service will ensure a DownloadTask exists.
-    //    queueService.StartIfNotRunning(songs[0].Id);
-    //}
     if (songs.Count == 0)
     {
-        logger.LogInformation("No songs found in playlist {PlaylistId} for user {Username}", playlist.PlaylistId, username);
+        logger.LogInformation("No songs found in playlist {PlaylistId} for user {Username}", playlist.PlaylistId, user.Username);
         return Results.Ok(new { songs = new List<object>(), message = "No songs found in the playlist" });
     }
-    logger.LogInformation("Found {Count} songs for user {Username}", songs.Count, username);
+    logger.LogInformation("Found {Count} songs for user {Username}", songs.Count, user.Username);
     return Results.Ok(new { songs, playlistId = playlist.PlaylistId, playlistTitle = playlist.PlaylistTitle });
 })
 .RequireAuthorization()
 .WithOpenApi();
 
-app.MapPost("/api/download", async (string videoId, HttpContext http, AppDbContext db, ILogger<Program> logger, DownloadQueueService queueService) =>
+app.MapPost("/api/download", async (string videoId, HttpContext http, AppDbContext db, ILogger<Program> logger, DownloadQueueService queueService, IAuthorizationService AuthService) =>
 {
-    var username = http.User.Identity?.Name;
-    if (username is null)
-    { 
-        logger.LogWarning("Unauthorized access to playlist songs");
+    User user;
+    try
+    {
+        user = await AuthService.CommonAuthCheck(http, db, logger);
+    }
+    catch (UnauthorizedAccessException)
+    {
         return Results.Unauthorized();
     }
+
+    logger.LogInformation("Download requested by user: {Username}", user.Username);
 
     var song = await db.PlaylistSongs.FirstOrDefaultAsync(s => s.VideoId == videoId);
     if (song is null)
@@ -499,13 +452,7 @@ app.MapPost("/api/download", async (string videoId, HttpContext http, AppDbConte
     }
 
     // verify ownership
-    var userId = await db.Users.Where(u => u.Username == username).Select(u => u.Id).FirstOrDefaultAsync();
-    if (userId == 0)
-    {
-        return Results.Unauthorized();
-    }
-
-    var playlist = await db.Playlists.FirstOrDefaultAsync(p => p.PlaylistId == song.PlaylistId && p.UserId == userId);
+    var playlist = await db.Playlists.FirstOrDefaultAsync(p => p.PlaylistId == song.PlaylistId && p.UserId == user.Id);
     if (playlist is null)
     {
         return Results.Unauthorized();
@@ -521,20 +468,16 @@ app.MapPost("/api/download", async (string videoId, HttpContext http, AppDbConte
     song.Status = PlaylistSongStatus.Pending;
     song.RetryCount = 0;
     song.LastChecked = DateTime.UtcNow;
-    song.RetryCount = 0;
     await db.SaveChangesAsync();
 
-    var jobUrl = $"/api/download/status/{song.Id}";
-    var downloadUrlPreview = $"/api/download/file/{song.Id}";
     logger.LogInformation("Enqueued download job for videoId={videoId}", song.Id);
 
     // Start the download queue service if it's not running.
     if (!queueService.IsRunning)
     {
-        queueService.StartIfNotRunning(username);
+        queueService.StartIfNotRunning(user.Username);
     }
-
-    return Results.Accepted(jobUrl, new { jobId = song.Id, status = song.Status, downloadUrl = downloadUrlPreview });
+    return Results.Accepted(null, new { jobId = song.Id, status = song.Status });
 })
 .RequireAuthorization()
 .WithOpenApi();
@@ -619,32 +562,28 @@ app.MapPost("/api/auth/login", async (AppDbContext db, LoginRequest request, ILo
 .WithName("api/auth/Login")
 .WithOpenApi(); // appear in Swagger
 
-app.MapPost("/api/auth/saveFcmToken", async (AppDbContext db, HttpContext http, SaveFcmTokenRequest request, ILogger<Program> logger) =>
+app.MapPost("/api/auth/saveFcmToken", async (AppDbContext db, HttpContext http, SaveFcmTokenRequest request, ILogger<Program> logger, IAuthorizationService AuthService) =>
 {
-    var username = http.User.Identity?.Name;
-    if (username is null)
+    User user;
+    try
     {
-        logger.LogWarning("Unauthorized access attempt to saveFcmToken.");
-        return Results.Unauthorized();
+        user = await AuthService.CommonAuthCheck(http, db, logger);
     }
-
-    var user = await db.Users.FirstOrDefaultAsync(u => u.Username == username);
-    if (user is null)
+    catch (UnauthorizedAccessException)
     {
-        logger.LogWarning("User not found in DB: {Username}", username);
         return Results.Unauthorized();
     }
 
     if (string.IsNullOrWhiteSpace(request.FCMToken))
     {
-        logger.LogWarning("Empty FCM token provided by user: {Username}", username);
+        logger.LogWarning("Empty FCM token provided by user: {Username}", user.Username);
         return Results.BadRequest(new { message = "FCM token cannot be empty" });
     }
 
     user.FCMToken = request.FCMToken;
     await db.SaveChangesAsync();
 
-    logger.LogInformation("FCM token saved for user: {Username}", username);
+    logger.LogInformation("FCM token saved for user: {Username}", user.Username);
     return Results.Ok(new { message = "FCM token saved successfully" });
 })
 .RequireAuthorization()
@@ -655,8 +594,3 @@ app.MapPost("/api/auth/saveFcmToken", async (AppDbContext db, HttpContext http, 
 
 app.Run();
 public partial class Program { }
-
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}

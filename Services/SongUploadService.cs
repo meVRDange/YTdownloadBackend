@@ -4,84 +4,63 @@ using YTdownloadBackend.Services.Storage;
 
 namespace YTdownloadBackend.Services
 {
-    public interface ISongUploadService
+    /// <summary>
+    /// The post-download pipeline: upload to cloud storage → generate signed download URL →
+    /// persist to DB → send FCM notification → clean local file.
+    /// </summary>
+    public interface ISongPipeline
     {
-        /// <summary>
-        /// Orchestrates: Upload to storage → Generate download URL → Send FCM → Clean local file
-        /// </summary>
-        Task<bool> ProcessDownloadedSongAsync(PlaylistSong song, string localFilePath, string username, User user);
+        Task<bool> ProcessAsync(PlaylistSong song, string localFilePath, string username, User user);
     }
 
-    public class SongUploadService : ISongUploadService
+    public class SongPipeline : ISongPipeline
     {
         private readonly IStorageProviderFactory _storageFactory;
-        private readonly IDownloadUrlService _urlService;
         private readonly IFcmService _fcmService;
         private readonly AppDbContext _dbContext;
-        private readonly ILogger<SongUploadService> _logger;
+        private readonly ILogger<SongPipeline> _logger;
 
-        public SongUploadService(
+        public SongPipeline(
             IStorageProviderFactory storageFactory,
-            IDownloadUrlService urlService,
             IFcmService fcmService,
             AppDbContext dbContext,
-            ILogger<SongUploadService> logger)
+            ILogger<SongPipeline> logger)
         {
             _storageFactory = storageFactory ?? throw new ArgumentNullException(nameof(storageFactory));
-            _urlService = urlService ?? throw new ArgumentNullException(nameof(urlService));
             _fcmService = fcmService ?? throw new ArgumentNullException(nameof(fcmService));
             _dbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
-        public async Task<bool> ProcessDownloadedSongAsync(PlaylistSong song, string localFilePath, string username, User user)
+        public async Task<bool> ProcessAsync(PlaylistSong song, string localFilePath, string username, User user)
         {
-            if (song is null)
-                throw new ArgumentNullException(nameof(song));
-            if (string.IsNullOrEmpty(localFilePath))
-                throw new ArgumentNullException(nameof(localFilePath));
-            if (user is null)
-                throw new ArgumentNullException(nameof(user));
+            if (song is null) throw new ArgumentNullException(nameof(song));
+            if (string.IsNullOrEmpty(localFilePath)) throw new ArgumentNullException(nameof(localFilePath));
+            if (user is null) throw new ArgumentNullException(nameof(user));
 
             try
             {
-                // STEP 1: Verify local file exists
+                // ── 1. Verify local file ──────────────────────
                 if (!File.Exists(localFilePath))
                 {
                     _logger.LogError("Local file not found for song {SongId}: {FilePath}", song.Id, localFilePath);
                     return false;
                 }
 
-                // STEP 2: Generate storage path (provider-agnostic)
+                // ── 2. Upload to cloud storage ────────────────
                 var fileName = Path.GetFileName(localFilePath);
                 var storagePath = $"users/{user.Id}/songs/{fileName}";
 
-                _logger.LogInformation("Starting storage upload for song {SongId}: {LocalPath} -> {StoragePath}",
+                _logger.LogInformation("Uploading song {SongId}: {LocalPath} -> {StoragePath}",
                     song.Id, localFilePath, storagePath);
 
-                var uploadedPath = string.Empty;
                 var storageProvider = _storageFactory.GetActiveProvider();
 
-                // STEP 3: Check if file already exists in storage
                 var fileExists = await storageProvider.FileExistsAsync(storagePath);
-                if (fileExists)
-                {
-                    _logger.LogInformation("File already exists in storage: {StoragePath}, skipping upload", storagePath);
-                    uploadedPath = storagePath;
-                }
-                else
-                {
-                    // STEP 3: Upload to storage
-                    try
-                    {
-                        uploadedPath = await storageProvider.UploadFileAsync(localFilePath, storagePath);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError("Storage upload failed for song {SongId}: {Message}", song.Id, ex.Message);
-                        throw;
-                    }
-                }
+                var uploadedPath = fileExists
+                    ? storagePath
+                    : await storageProvider.UploadFileAsync(localFilePath, storagePath);
+
                 if (string.IsNullOrEmpty(uploadedPath))
                 {
                     _logger.LogError("Storage upload returned null path for song {SongId}", song.Id);
@@ -89,57 +68,47 @@ namespace YTdownloadBackend.Services
                 }
                 song.StoragePath = uploadedPath;
 
-                // STEP 4: Generate download URL (valid for 48 hours)
-                var downloadUrl = await _urlService.GetOrGenerateDownloadUrlAsync(song, TimeSpan.FromHours(48));
+                // ── 3. Generate signed download URL ──────────
+                var downloadUrl = await GetOrGenerateDownloadUrlAsync(song);
                 if (downloadUrl is null)
                 {
                     _logger.LogError("Failed to generate download URL for song {SongId}", song.Id);
                     return false;
                 }
 
-                // STEP 5: Update song record with storage info
-                song.StoragePath = uploadedPath;
+                // ── 4. Persist to DB ─────────────────────────
                 song.DownloadUrl = downloadUrl;
                 song.Status = PlaylistSongStatus.Completed;
                 song.DownloadedAt = DateTime.UtcNow;
-
                 await _dbContext.SaveChangesAsync();
 
-                _logger.LogInformation("Song {SongId} uploaded to storage and database updated", song.Id);
+                _logger.LogInformation("Song {SongId} uploaded and saved", song.Id);
 
-                // STEP 6: Send FCM notification with download link (if user has FCM token)
+                // ── 5. Send FCM notification ──────────────────
                 if (!string.IsNullOrEmpty(user.FCMToken))
                 {
                     try
                     {
                         var messageId = await _fcmService.SendDownloadCompletedNotificationAsync(
-                            user.FCMToken,
-                            song.Title,
-                            downloadUrl
-                        );
+                            user.FCMToken, song.Title, downloadUrl);
 
-                        if (messageId is not null)
-                        {
-                            _logger.LogInformation("FCM notification sent for song {SongId}, MessageId={MessageId}",
-                                song.Id, messageId);
-                        }
-                        else
-                        {
-                            _logger.LogWarning("FCM notification failed for song {SongId}", song.Id);
-                        }
+                        _logger.LogInformation(
+                            messageId is not null
+                                ? "FCM sent for song {SongId}, MessageId={MessageId}"
+                                : "FCM failed for song {SongId}",
+                            song.Id, messageId);
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Exception while sending FCM notification for song {SongId}", song.Id);
+                        _logger.LogError(ex, "FCM exception for song {SongId}", song.Id);
                     }
                 }
                 else
                 {
-                    _logger.LogWarning("User {UserId} has no FCM token; skipping notification for song {SongId}",
-                        user.Id, song.Id);
+                    _logger.LogWarning("User {UserId} has no FCM token; skipping notification", user.Id);
                 }
 
-                // STEP 7: Delete local file to free up disk space
+                // ── 6. Delete local file ──────────────────────
                 try
                 {
                     File.Delete(localFilePath);
@@ -147,18 +116,48 @@ namespace YTdownloadBackend.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to delete local file {FilePath}: {Message}", localFilePath, ex.Message);
-                    // Don't fail the entire operation if cleanup fails
+                    _logger.LogWarning(ex, "Failed to delete local file {FilePath}", localFilePath);
                 }
 
                 return true;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Exception in ProcessDownloadedSongAsync for song {SongId}: {Message}",
-                    song.Id, ex.Message);
+                _logger.LogError(ex, "Pipeline failed for song {SongId}: {Message}", song.Id, ex.Message);
                 return false;
             }
+        }
+
+        private async Task<string?> GetOrGenerateDownloadUrlAsync(PlaylistSong song)
+        {
+            var duration = TimeSpan.FromHours(48);
+
+            // Return cached URL if still fresh (>5 min before expiry)
+            if (!string.IsNullOrEmpty(song.DownloadUrl) &&
+                song.DownloadUrlExpiry > DateTime.UtcNow.AddMinutes(5))
+            {
+                _logger.LogInformation("Returning cached download URL for song {SongId}", song.Id);
+                return song.DownloadUrl;
+            }
+
+            if (string.IsNullOrEmpty(song.StoragePath))
+            {
+                _logger.LogWarning("Song {SongId} has no StoragePath set", song.Id);
+                return null;
+            }
+
+            var provider = _storageFactory.GetActiveProvider();
+            var url = await provider.GetDownloadUrlAsync(song.StoragePath, duration);
+
+            if (url is null) return null;
+
+            song.DownloadUrl = url;
+            song.DownloadUrlExpiry = DateTime.UtcNow.Add(duration);
+
+            _logger.LogInformation("Generated download URL for song {SongId} via {Provider}, valid until {Expiry}",
+                song.Id, provider.Name, song.DownloadUrlExpiry);
+
+            return url;
         }
     }
 }

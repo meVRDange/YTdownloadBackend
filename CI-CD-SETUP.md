@@ -111,6 +111,9 @@ jobs:
           Write-Host "❌ Health check failed"
           exit 1
         }
+        # Ensure required environment variables are set on the deployment server, especially the Firebase FCM token:
+        #   FIREBASE_FCM_TOKEN=your-fcm-token-here
+        # These can be set in the service's environment or via a system-wide variable before starting the service.
       shell: powershell
 ```
 
