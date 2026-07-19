@@ -8,9 +8,11 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.RateLimiting;
 using YTdownloadBackend.Data;
 using YTdownloadBackend.Models;
 using YTdownloadBackend.Services;
+using YTdownloadBackend.Services.Storage;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -52,24 +54,38 @@ builder.Services.AddHttpClient<IYouTubeService, YouTubeService>();
 builder.Services.AddScoped<IYtDlpService, YtDlpService>();
 builder.Services.AddScoped<PlaylistScannerService>();
 builder.Services.AddSingleton<IFcmService, FcmService>();
+// Register authorization service for endpoint injection
+builder.Services.AddScoped<IAuthorizationService, AuthorizationService>();
+// Register the manually-started download queue service as a singleton so it can be started from endpoints
+builder.Services.AddSingleton<DownloadQueueService>();
+builder.Services.AddScoped<ISongUploadService, SongUploadService>();
+
+// Configure storage provider options from the "Storage" config section
+builder.Services.Configure<StorageProviderOptions>(builder.Configuration.GetSection("Storage"));
+
+// Register storage provider, factory, and download URL service
+builder.Services.AddSingleton<IStorageProvider, FirebaseStorageProvider>();
+builder.Services.AddSingleton<IStorageProviderFactory, StorageProviderFactory>();
+builder.Services.AddScoped<IDownloadUrlService, DownloadUrlService>();
+
 
 // Load FCM token from configuration (appsettings) or environment variable.
 // This token is used for sending Firebase Cloud Messaging notifications.
 var fcmToken = builder.Configuration["Firebase:FCMToken"] ?? Environment.GetEnvironmentVariable("FIREBASE_FCM_TOKEN");
-
-// Register authorization service for endpoint injection
-builder.Services.AddScoped<IAuthorizationService, AuthorizationService>();
-
-// Register the manually-started download queue service as a singleton so it can be started from endpoints
-builder.Services.AddSingleton<DownloadQueueService>();
-
+ 
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(
         builder.Configuration.GetConnectionString("DefaultConnection")));
 
+// Firebase credentials: prefer GOOGLE_APPLICATION_CREDENTIALS env var (industry standard),
+// then FIREBASE_CREDENTIALS_PATH, then fall back to default path for local dev
+var firebaseCredentialsPath = Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS")
+    ?? Environment.GetEnvironmentVariable("FIREBASE_CREDENTIALS_PATH")
+    ?? "Keys/ytdownloder-7aa70-firebase-adminsdk-fbsvc-565e663998.json";
+
 FirebaseApp.Create(new AppOptions()
 {
-    Credential = GoogleCredential.FromFile("Keys\\ytdownloder-7aa70-firebase-adminsdk-fbsvc-565e663998.json")
+    Credential = GoogleCredential.FromFile(firebaseCredentialsPath)
 });
 
 
@@ -78,7 +94,7 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAngularPWA", policy =>
     {
-        policy.WithOrigins("http://localhost:4200", "https://localhost", "https://192.168.29.87:5062")
+        policy.WithOrigins("http://localhost:4200", "https://localhost", "https://192.168.29.110")
               .AllowAnyHeader()
               .AllowAnyMethod();
     });
@@ -104,25 +120,74 @@ builder.Services.AddAuthentication(options =>
         };
     });
 
-// Add Firebase Storage registration:
-var firebaseBucketName = builder.Configuration["Firebase:StorageBucket"]
-    ?? throw new InvalidOperationException("Firebase storage bucket not configured.");
+// ── Rate Limiting ──────────────────────────────────────────────
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
 
-builder.Services.AddSingleton<IFirebaseStorageService>(sp =>
-    new FirebaseStorageService(
-        firebaseBucketName,
-        sp.GetRequiredService<ILogger<FirebaseStorageService>>()
-    )
-);
+    // Login endpoint: 5 attempts per minute per connection
+    options.AddPolicy("LoginRateLimit", ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 5,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            }));
 
-builder.Services.AddScoped<IFirebaseUrlService, FirebaseUrlService>();
-builder.Services.AddScoped<ISongUploadService, SongUploadService>();
+    // Global: 120 requests per minute per connection (applied everywhere by default)
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 120,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            }));
 
+    // On rejected, write a clean JSON response
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        context.HttpContext.Response.ContentType = "application/json";
+        var result = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            error = "Too many requests. Please slow down and try again later."
+        });
+        await context.HttpContext.Response.WriteAsync(result, cancellationToken);
+    };
+});
 
 var app = builder.Build();
 
 // Enable CORS policy - MUST come before Authentication/Authorization
 app.UseCors("AllowAngularPWA");
+
+app.UseRateLimiter();
+
+// ── Security Headers ───────────────────────────────────────────
+app.Use(async (ctx, next) =>
+{
+    var headers = ctx.Response.Headers;
+    headers["X-Content-Type-Options"] = "nosniff";
+    headers["X-Frame-Options"] = "DENY";
+    headers["X-XSS-Protection"] = "0";
+    headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+    headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'";
+    headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
+
+    // HSTS: only when running over HTTPS (not in local dev)
+    if (ctx.Request.IsHttps)
+    {
+        headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";
+    }
+
+    await next();
+});
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -134,13 +199,16 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();   // Enable UI
 }
 
-app.UseHttpsRedirection();
+// Temporarily disabled for phone testing on local network
+// app.UseHttpsRedirection();
 
 // Ensure downloads directory exists on startup
 var downloadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "downloads");
 Directory.CreateDirectory(downloadsFolder);
 
-app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }))
+app.MapGet("/health", 
+() => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }))
+    .DisableRateLimiting()
     .WithName("Health")
     .WithOpenApi()
     .AllowAnonymous();
@@ -181,8 +249,8 @@ app.MapGet("/api/healthCheck", async (ILogger<Program> logger, HttpContext http,
         return Results.Problem("Failed to send notification.");
     }
 })
-    .RequireAuthorization()
-    .WithName("healthCheck");
+.RequireAuthorization()
+.WithName("healthCheck");
 
 
 app.MapGet("/api/uploadTest", async (ILogger<Program> logger, HttpContext http, IFcmService fcmService, AppDbContext db, ISongUploadService uploadService) =>
@@ -196,7 +264,12 @@ app.MapGet("/api/uploadTest", async (ILogger<Program> logger, HttpContext http, 
         return Results.Unauthorized();
     }
 
-    User user = await db.Users.FirstOrDefaultAsync(u => u.Username == username);
+    User? user = await db.Users.FirstOrDefaultAsync(u => u.Username == username);
+    if (user is null)
+    {
+        logger.LogWarning("User not found for username: {Username}", username);
+        return Results.NotFound("User not found");
+    }
     PlaylistSong playlistSong= new PlaylistSong { PlaylistId = "TEST_PLAYLIST", VideoId = "TEST_VIDEO", Title = "Test Song" };
     string expectedPath = Path.Combine(Directory.GetCurrentDirectory(), "downloads","sa", "august.mp3");
     bool uploadSuccess = await uploadService.ProcessDownloadedSongAsync(playlistSong, expectedPath, username, user);
@@ -206,10 +279,11 @@ app.MapGet("/api/uploadTest", async (ILogger<Program> logger, HttpContext http, 
     });
 })
 .RequireAuthorization()
-.WithName("uploadTest");
+.WithName("uploadTest"); 
 
 app.MapPost("/api/savePlaylist", async (PlaylistRequest request, AppDbContext db, HttpContext http, IYouTubeService ytService, ILogger<Program> logger, IAuthorizationService AuthService) =>
 {
+    if (request is null) return Results.BadRequest("Request body is required.");
     try
     {
         User user;
@@ -217,7 +291,7 @@ app.MapPost("/api/savePlaylist", async (PlaylistRequest request, AppDbContext db
         {
             user = await AuthService.CommonAuthCheck(http, db, logger);
         }
-        catch (UnauthorizedAccessException ex)
+        catch (UnauthorizedAccessException)
         {
             return Results.Unauthorized();
         }
@@ -228,7 +302,7 @@ app.MapPost("/api/savePlaylist", async (PlaylistRequest request, AppDbContext db
             return Results.BadRequest("Playlist URL cannot be empty");
         }
 
-        logger.LogInformation("Received playlist URL: {PlaylistUrl}", request?.PlaylistUrl);
+        logger.LogInformation("Received playlist URL: {PlaylistUrl}", request.PlaylistUrl);
         logger.LogInformation("savePlaylist called by user: {Username} (Id: {UserId})", user.Username, user.Id);
 
         var existing = await db.Playlists.FirstOrDefaultAsync(p => p.UserId == user.Id);
@@ -321,7 +395,7 @@ app.MapGet("/api/getPlaylist", async (AppDbContext db, HttpContext http, IAuthor
     {
         user = await AuthService.CommonAuthCheck(http, db, logger);
     }
-    catch (UnauthorizedAccessException ex)
+    catch (UnauthorizedAccessException)
     {
         return Results.Unauthorized();
     }
@@ -461,32 +535,32 @@ app.MapPost("/api/download", async (string videoId, HttpContext http, AppDbConte
 .RequireAuthorization()
 .WithOpenApi();
 
-app.MapPost("/api/auth/signup", async (AppDbContext db, SignupRequest request) =>
-{
-    // Check if user already exists
-    var existingUser = await db.Users.FirstOrDefaultAsync(u => u.Username == request.Username);
-    if (existingUser != null)
-    {
-        return Results.BadRequest(new { message = "Username already exists" });
-    }
+// app.MapPost("/api/auth/signup", async (AppDbContext db, SignupRequest request) =>
+// {
+//     // Check if user already exists
+//     var existingUser = await db.Users.FirstOrDefaultAsync(u => u.Username == request.Username);
+//     if (existingUser != null)
+//     {
+//         return Results.BadRequest(new { message = "Username already exists" });
+//     }
 
-    // Hash the password before storing
-    string passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
+//     // Hash the password before storing
+//     string passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
 
 
-    var user = new User
-    {
-        Username = request.Username,
-        PasswordHash = passwordHash
-    };
+//     var user = new User
+//     {
+//         Username = request.Username,
+//         PasswordHash = passwordHash
+//     };
 
-    db.Users.Add(user);
-    await db.SaveChangesAsync();
+//     db.Users.Add(user);
+//     await db.SaveChangesAsync();
 
-    return Results.Ok(new { message = "User created successfully" });
-})
-.WithName("Signup")
-.WithOpenApi(); // appear in Swagger
+//     return Results.Ok(new { message = "User created successfully" });
+// })
+// .WithName("Signup")
+// .WithOpenApi(); // appear in Swagger
 
 app.MapPost("/api/auth/login", async (AppDbContext db, LoginRequest request, ILogger<Program> logger) =>
 {
@@ -502,6 +576,7 @@ app.MapPost("/api/auth/login", async (AppDbContext db, LoginRequest request, ILo
         }
         //log the username from db
         logger.LogInformation("User found in DB: {Username}", user.Username);
+
         // Verify password using BCrypt
         bool isPasswordValid = BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash);
         if (!isPasswordValid)
@@ -531,11 +606,12 @@ app.MapPost("/api/auth/login", async (AppDbContext db, LoginRequest request, ILo
         var jwtToken = tokenHandler.WriteToken(token);
 
         return Results.Ok(new { token = jwtToken });
-    } catch(Exception ex)
+    } catch(Exception)
     {
         return Results.StatusCode(500);
     }
 })
+.RequireRateLimiting("LoginRateLimit")
 .WithName("api/auth/Login")
 .WithOpenApi(); // appear in Swagger
 

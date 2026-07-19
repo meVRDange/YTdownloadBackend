@@ -9,3 +9,6 @@
 Tests/bin
 Tests/obj
 keys
+Keys/
+Keys/*.json
+.env
