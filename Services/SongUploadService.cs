@@ -108,22 +108,15 @@ namespace YTdownloadBackend.Services
                     _logger.LogWarning("User {UserId} has no FCM token; skipping notification", user.Id);
                 }
 
-                // ── 6. Delete local file (skip for local storage) ──
-                if (storageProvider.Name != "Local")
+                // ── 6. Delete local file ──
+                try
                 {
-                    try
-                    {
-                        File.Delete(localFilePath);
-                        _logger.LogInformation("Local file deleted: {FilePath}", localFilePath);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to delete local file {FilePath}", localFilePath);
-                    }
+                    File.Delete(localFilePath);
+                    _logger.LogInformation("Local file deleted: {FilePath}", localFilePath);
                 }
-                else
+                catch (Exception ex)
                 {
-                    _logger.LogInformation("Local storage — keeping file: {FilePath}", localFilePath);
+                    _logger.LogWarning(ex, "Failed to delete local file {FilePath}", localFilePath);
                 }
 
                 return true;
