@@ -14,19 +14,28 @@ namespace YTdownloadBackend.Services.Storage
     {
         public string Name => "Firebase";
 
+        private readonly IOptions<StorageProviderOptions> _options;
         private StorageClient? _storageClient;
         private ServiceAccountCredential? _serviceAccountCredential;
         private readonly object _clientLock = new();
 
-        private readonly string _bucketName;
         private readonly ILogger<FirebaseStorageProvider> _logger;
 
         public FirebaseStorageProvider(IOptions<StorageProviderOptions> options, ILogger<FirebaseStorageProvider> logger)
         {
-            var bucket = options?.Value?.Firebase?.Bucket
-                ?? throw new InvalidOperationException("Storage:Firebase:Bucket is not configured.");
-            _bucketName = bucket;
+            _options = options ?? throw new ArgumentNullException(nameof(options));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        }
+
+        private string BucketName
+        {
+            get
+            {
+                var bucket = _options.Value?.Firebase?.Bucket;
+                if (string.IsNullOrWhiteSpace(bucket))
+                    throw new InvalidOperationException("Storage:Firebase:Bucket is not configured.");
+                return bucket;
+            }
         }
 
         public async Task<bool> FileExistsAsync(string storagePath, CancellationToken cancellationToken = default)
@@ -40,12 +49,12 @@ namespace YTdownloadBackend.Services.Storage
             try
             {
                 var client = GetStorageClient();
-                var obj = await client.GetObjectAsync(_bucketName, storagePath, null, cancellationToken);
+                var obj = await client.GetObjectAsync(BucketName, storagePath, null, cancellationToken);
                 return obj != null;
             }
             catch (Google.GoogleApiException ex) when (ex.HttpStatusCode == System.Net.HttpStatusCode.NotFound)
             {
-                _logger.LogInformation("File not found in storage: gs://{Bucket}/{Path}", _bucketName, storagePath);
+                _logger.LogInformation("File not found in storage: gs://{Bucket}/{Path}", BucketName, storagePath);
                 return false;
             }
             catch (Google.GoogleApiException ex)
@@ -74,12 +83,12 @@ namespace YTdownloadBackend.Services.Storage
                 var client = GetStorageClient();
                 var fileInfo = new FileInfo(localFilePath);
                 _logger.LogInformation("Starting upload: {FileName} ({FileSize} bytes) -> gs://{Bucket}/{Path}",
-                    fileInfo.Name, fileInfo.Length, _bucketName, storagePath);
+                    fileInfo.Name, fileInfo.Length, BucketName, storagePath);
 
                 using (var fileStream = File.OpenRead(localFilePath))
                 {
-                    await client.UploadObjectAsync(_bucketName, storagePath, contentType, fileStream, cancellationToken: cancellationToken);
-                    _logger.LogInformation("Upload completed: gs://{Bucket}/{Path}", _bucketName, storagePath);
+                    await client.UploadObjectAsync(BucketName, storagePath, contentType, fileStream, cancellationToken: cancellationToken);
+                    _logger.LogInformation("Upload completed: gs://{Bucket}/{Path}", BucketName, storagePath);
                     return storagePath;
                 }
             }
@@ -104,18 +113,18 @@ namespace YTdownloadBackend.Services.Storage
                 duration ??= TimeSpan.FromHours(48);
 
                 _logger.LogInformation("Generating signed download URL for: gs://{Bucket}/{Path} (expires in {Duration})",
-                    _bucketName, storagePath, duration);
+                    BucketName, storagePath, duration);
 
-                var storageObject = await client.GetObjectAsync(_bucketName, storagePath);
+                var storageObject = await client.GetObjectAsync(BucketName, storagePath);
                 if (storageObject == null)
                 {
-                    _logger.LogWarning("Storage object not found: gs://{Bucket}/{Path}", _bucketName, storagePath);
+                    _logger.LogWarning("Storage object not found: gs://{Bucket}/{Path}", BucketName, storagePath);
                     return null;
                 }
 
                 var credential = GetServiceAccountCredential();
                 var urlSigner = UrlSigner.FromCredential(credential);
-                var signedUrl = urlSigner.Sign(_bucketName, storagePath, duration.Value, HttpMethod.Get);
+                var signedUrl = urlSigner.Sign(BucketName, storagePath, duration.Value, HttpMethod.Get);
 
                 _logger.LogInformation("Signed download URL generated, expires in {Duration}", duration);
                 return signedUrl;
@@ -138,13 +147,13 @@ namespace YTdownloadBackend.Services.Storage
             try
             {
                 var client = GetStorageClient();
-                await client.DeleteObjectAsync(_bucketName, storagePath, null, cancellationToken);
-                _logger.LogInformation("Storage object deleted: gs://{Bucket}/{Path}", _bucketName, storagePath);
+                await client.DeleteObjectAsync(BucketName, storagePath, null, cancellationToken);
+                _logger.LogInformation("Storage object deleted: gs://{Bucket}/{Path}", BucketName, storagePath);
                 return true;
             }
             catch (Google.GoogleApiException ex) when (ex.HttpStatusCode == System.Net.HttpStatusCode.NotFound)
             {
-                _logger.LogWarning("Storage object not found (already deleted?): gs://{Bucket}/{Path}", _bucketName, storagePath);
+                _logger.LogWarning("Storage object not found (already deleted?): gs://{Bucket}/{Path}", BucketName, storagePath);
                 return true;
             }
             catch (Google.GoogleApiException ex)

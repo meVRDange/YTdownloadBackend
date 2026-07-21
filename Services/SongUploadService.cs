@@ -47,9 +47,9 @@ namespace YTdownloadBackend.Services
                     return false;
                 }
 
-                // ── 2. Upload to cloud storage ────────────────
+                // ── 2. Upload to storage ──────────────────────
                 var fileName = Path.GetFileName(localFilePath);
-                var storagePath = $"users/{user.Id}/songs/{fileName}";
+                var storagePath = $"{username}/songs/{fileName}";
 
                 _logger.LogInformation("Uploading song {SongId}: {LocalPath} -> {StoragePath}",
                     song.Id, localFilePath, storagePath);
@@ -108,15 +108,22 @@ namespace YTdownloadBackend.Services
                     _logger.LogWarning("User {UserId} has no FCM token; skipping notification", user.Id);
                 }
 
-                // ── 6. Delete local file ──────────────────────
-                try
+                // ── 6. Delete local file (skip for local storage) ──
+                if (storageProvider.Name != "Local")
                 {
-                    File.Delete(localFilePath);
-                    _logger.LogInformation("Local file deleted: {FilePath}", localFilePath);
+                    try
+                    {
+                        File.Delete(localFilePath);
+                        _logger.LogInformation("Local file deleted: {FilePath}", localFilePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to delete local file {FilePath}", localFilePath);
+                    }
                 }
-                catch (Exception ex)
+                else
                 {
-                    _logger.LogWarning(ex, "Failed to delete local file {FilePath}", localFilePath);
+                    _logger.LogInformation("Local storage — keeping file: {FilePath}", localFilePath);
                 }
 
                 return true;

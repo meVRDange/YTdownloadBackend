@@ -27,13 +27,6 @@ public sealed class StorageProviderOptions
     /// </summary>
     public FirebaseOptions Firebase { get; set; } = new();
 
-    /// <summary>
-    /// AWS S3 specific settings. Populated from the "Storage:S3" section.
-    /// Unused until an S3 provider is implemented, but kept here so config
-    /// can be authored ahead of time.
-    /// </summary>
-    public S3Options S3 { get; set; } = new();
-
     /// <summary>Settings for the Firebase / GCS provider.</summary>
     public sealed class FirebaseOptions
     {
@@ -44,10 +37,14 @@ public sealed class StorageProviderOptions
         public string Bucket { get; set; } = string.Empty;
     }
 
-    /// <summary>Settings for a future AWS S3 provider.</summary>
-    public sealed class S3Options
+    /// <summary>Settings for the local-disk storage provider.</summary>
+    public sealed class LocalOptions
     {
-        public string Bucket { get; set; } = string.Empty;
-        public string Region { get; set; } = "us-east-1";
+        /// <summary>Base URL for generating download links (e.g. "https://api.vdange.site").</summary>
+        public string BaseUrl { get; set; } = string.Empty;
+        /// <summary>Root folder for stored files. Defaults to "downloads" under the app root.</summary>
+        public string DownloadsRoot { get; set; } = "downloads";
     }
+
+    public LocalOptions Local { get; set; } = new();
 }

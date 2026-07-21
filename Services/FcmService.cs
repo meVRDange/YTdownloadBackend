@@ -1,3 +1,4 @@
+using FirebaseAdmin;
 using FirebaseAdmin.Messaging;
 using Microsoft.Extensions.Logging;
 
@@ -19,11 +20,20 @@ public interface IFcmService
 
 public class FcmService : IFcmService
 {
+    private readonly FirebaseMessaging _messaging;
     private readonly ILogger<FcmService> _logger;
 
     public FcmService(ILogger<FcmService> logger)
     {
         _logger = logger;
+
+        // Use the named "fcm-app" if available; fall back to default
+        FirebaseApp? fcmApp;
+        try { fcmApp = FirebaseApp.GetInstance("fcm-app"); }
+        catch { fcmApp = FirebaseApp.DefaultInstance; }
+
+        _messaging = FirebaseMessaging.GetMessaging(fcmApp);
+        _logger.LogInformation("FCM initialized with app: {AppName}", fcmApp.Name);
     }
 
     public async Task<string?> SendDownloadNotificationAsync(string deviceToken, IReadOnlyDictionary<string, string> data, CancellationToken cancellationToken = default)
@@ -38,12 +48,11 @@ public class FcmService : IFcmService
             var message = new Message
             {
                 Token = deviceToken,
-                // Data-only payload — the client background handler will process this
-                //Notification = new Notification
-                //{
-                //    Title = "Your song is ready",
-                //    Body = $"is available"
-                //},
+                Notification = new Notification
+                {
+                    Title = "Download Complete",
+                    Body = data.TryGetValue("songTitle", out var title) ? $"\"{title}\" is ready!" : "Your song is ready to download."
+                },
                 Data = data,
                 Android = new AndroidConfig
                 {
@@ -53,15 +62,20 @@ public class FcmService : IFcmService
                 },
                 Apns = new ApnsConfig
                 {
-                    // For iOS silent pushes, indicate content-available
                     Aps = new Aps
                     {
+                        Alert = new ApsAlert
+                        {
+                            Title = "Download Complete",
+                            Body = data.TryGetValue("songTitle", out var iosTitle) ? $"\"{iosTitle}\" is ready!" : "Your song is ready to download."
+                        },
+                        Sound = "default",
                         ContentAvailable = true
                     }
                 }
             };
 
-            string response = await FirebaseMessaging.DefaultInstance.SendAsync(message, cancellationToken);
+            string response = await _messaging.SendAsync(message, cancellationToken);
             _logger.LogInformation("FCM message sent. MessageId={MessageId} DeviceToken={DeviceToken}", response, deviceToken);
             return response;
         }
