@@ -15,22 +15,66 @@ namespace YTdownloadBackend.Services
         private readonly string _downloadsFolder;
         private readonly string _versionFile;
         private readonly string _cookiesFile;
+        private readonly string _denoPath;
         private readonly TimeSpan _checkInterval = TimeSpan.FromHours(24);
 
         public YtDlpService()
         {
             string ytDlpFileName = "yt-dlp.exe";
 
-            _ytDlpPath = //get value from appsettings.json or environment variable if needed    
-                
-
-
             _ytDlpPath = Path.Combine(Directory.GetCurrentDirectory(), "yt-dlp", ytDlpFileName);
             _downloadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "downloads");
             _versionFile = Path.Combine(Directory.GetCurrentDirectory(), "yt-dlp.lastcheck");
             _cookiesFile = Path.Combine(Directory.GetCurrentDirectory(), "yt-dlp", "cookies.txt");
 
+            // Find deno for JS challenge solving
+            _denoPath = FindDeno();
+
             Directory.CreateDirectory(_downloadsFolder);
+        }
+
+        private static string FindDeno()
+        {
+            // Try common locations
+            var paths = new[]
+            {
+                "deno", // hope it's on PATH
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    @"Microsoft\WinGet\Packages\DenoLand.Deno_Microsoft.Winget.Source_8wekyb3d8bbwe\deno.exe"),
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".deno\bin\deno.exe"),
+                @"C:\Program Files\deno\deno.exe"
+            };
+
+            foreach (var path in paths)
+            {
+                if (path == "deno")
+                {
+                    // Check if deno is on PATH
+                    try
+                    {
+                        var psi = new ProcessStartInfo
+                        {
+                            FileName = "deno",
+                            Arguments = "--version",
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            UseShellExecute = false,
+                            CreateNoWindow = true
+                        };
+                        using var proc = Process.Start(psi);
+                        proc?.WaitForExit(3000);
+                        if (proc?.ExitCode == 0)
+                            return "deno";
+                    }
+                    catch { }
+                }
+                else if (File.Exists(path))
+                {
+                    return path;
+                }
+            }
+
+            return "deno"; // fallback
         }
 
 
@@ -117,7 +161,7 @@ namespace YTdownloadBackend.Services
         {
             string outputTemplate = Path.Combine(_downloadsFolder, username, "%(title)s.%(ext)s");
             string cookiesArg = File.Exists(_cookiesFile) ? $"--cookies \"{_cookiesFile}\" " : "";
-            string args = $"--js-runtimes deno --restrict-filenames {cookiesArg}--extract-audio --audio-format mp3 -o \"{outputTemplate}\" https://www.youtube.com/watch?v={videoId}";
+            string args = $"--js-runtimes \"{_denoPath}\" --restrict-filenames {cookiesArg}--extract-audio --audio-format mp3 -o \"{outputTemplate}\" https://www.youtube.com/watch?v={videoId}";
             var result = await RunProcessAsync(_ytDlpPath, args);
             
             // Parse filename from StdOut (assuming yt-dlp outputs something like "[download] Destination: /path/to/file.mp3")
