@@ -12,3 +12,4 @@ keys
 Keys/
 Keys/*.json
 .env
+yt-dlp/cookies.txt
