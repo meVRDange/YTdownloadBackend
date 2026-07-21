@@ -56,6 +56,7 @@ builder.Services.AddScoped<PlaylistScannerService>();
 builder.Services.AddSingleton<IFcmService, FcmService>();
 // Register authorization service for endpoint injection
 builder.Services.AddScoped<IAuthorizationService, AuthorizationService>();
+builder.Services.AddScoped<RepositoryService>();
 // Register the manually-started download queue service as a singleton so it can be started from endpoints
 builder.Services.AddSingleton<DownloadQueueService>();
 builder.Services.AddScoped<ISongPipeline, SongPipeline>();
@@ -65,6 +66,7 @@ builder.Services.Configure<StorageProviderOptions>(builder.Configuration.GetSect
 
 // Register storage provider and factory
 builder.Services.AddSingleton<IStorageProvider, FirebaseStorageProvider>();
+builder.Services.AddSingleton<IStorageProvider, LocalStorageProvider>();
 builder.Services.AddSingleton<IStorageProviderFactory, StorageProviderFactory>();
 
 
@@ -72,8 +74,8 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(
         builder.Configuration.GetConnectionString("DefaultConnection")));
 
-// Firebase credentials: prefer GOOGLE_APPLICATION_CREDENTIALS env var (industry standard),
-// then FIREBASE_CREDENTIALS_PATH, then fall back to default path for local dev
+// Firebase: default app uses GOOGLE_APPLICATION_CREDENTIALS (avid-life for Auth etc.)
+// FCM uses a separate named app pointing to ytdownloder project
 var firebaseCredentialsPath = Environment.GetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS")
     ?? Environment.GetEnvironmentVariable("FIREBASE_CREDENTIALS_PATH")
     ?? "Keys/ytdownloder-7aa70-firebase-adminsdk-fbsvc-565e663998.json";
@@ -83,6 +85,16 @@ FirebaseApp.Create(new AppOptions()
     Credential = GoogleCredential.FromFile(firebaseCredentialsPath)
 });
 
+// Create a named app for FCM using the ytdownloder service account
+var fcmCredentialsPath = "Keys/ytdownloder-7aa70-firebase-adminsdk-fbsvc-565e663998.json";
+if (File.Exists(fcmCredentialsPath))
+{
+    FirebaseApp.Create(new AppOptions()
+    {
+        Credential = GoogleCredential.FromFile(fcmCredentialsPath)
+    }, "fcm-app");
+}
+
 
 // Add CORS policy to allow requests from Angular PWA
 builder.Services.AddCors(options =>
@@ -91,6 +103,7 @@ builder.Services.AddCors(options =>
     {
         policy.WithOrigins(
             "http://localhost:4200",
+            "https://api.vdange.site",
             "https://vdange.site",
             "https://www.vdange.site",
             "https://192.168.29.110")
@@ -190,6 +203,58 @@ app.Use(async (ctx, next) =>
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+// ── Local Storage: Serve downloads/ with JWT ownership check ──
+// Only authenticated users can access their own files.
+app.UseWhen(
+    ctx => ctx.Request.Path.StartsWithSegments("/downloads", StringComparison.OrdinalIgnoreCase),
+    downloadsApp =>
+    {
+        downloadsApp.Use(async (ctx, next) =>
+        {
+            // Path format: /downloads/{username}/{file...}
+            var path = ctx.Request.Path.Value ?? "";
+            var segments = path.TrimStart('/').Split('/', 3); // ["downloads", "username", "rest"]
+
+            if (segments.Length < 2 ||
+                !string.Equals(segments[0], "downloads", StringComparison.OrdinalIgnoreCase))
+            {
+                ctx.Response.StatusCode = 400;
+                return;
+            }
+
+            // Extract claimed username from JWT
+            var usernameClaim = ctx.User?.FindFirst(ClaimTypes.Name)?.Value
+                ?? ctx.User?.FindFirst("username")?.Value;
+
+            if (string.IsNullOrEmpty(usernameClaim))
+            {
+                ctx.Response.StatusCode = 401;
+                await ctx.Response.WriteAsync("Authentication required.");
+                return;
+            }
+
+            // Verify ownership: the URL path must start with the user's username
+            if (segments.Length < 2 ||
+                !string.Equals(segments[1], usernameClaim, StringComparison.OrdinalIgnoreCase))
+            {
+                ctx.Response.StatusCode = 403;
+                await ctx.Response.WriteAsync("Access denied. You can only access your own files.");
+                return;
+            }
+
+            await next();
+        });
+
+        downloadsApp.UseStaticFiles(new StaticFileOptions
+        {
+            FileProvider = new Microsoft.Extensions.FileProviders.PhysicalFileProvider(
+                Path.Combine(Directory.GetCurrentDirectory(), "downloads")),
+            RequestPath = "/downloads",
+            ServeUnknownFileTypes = true,
+            DefaultContentType = "audio/mpeg"
+        });
+    });
 
 // Only in Development environment
 if (app.Environment.IsDevelopment())
@@ -482,32 +547,32 @@ app.MapPost("/api/download", async (string videoId, HttpContext http, AppDbConte
 .RequireAuthorization()
 .WithOpenApi();
 
-// app.MapPost("/api/auth/signup", async (AppDbContext db, SignupRequest request) =>
-// {
-//     // Check if user already exists
-//     var existingUser = await db.Users.FirstOrDefaultAsync(u => u.Username == request.Username);
-//     if (existingUser != null)
-//     {
-//         return Results.BadRequest(new { message = "Username already exists" });
-//     }
+app.MapPost("/api/auth/signup", async (AppDbContext db, SignupRequest request) =>
+{
+    // Check if user already exists
+    var existingUser = await db.Users.FirstOrDefaultAsync(u => u.Username == request.Username);
+    if (existingUser != null)
+    {
+        return Results.BadRequest(new { message = "Username already exists" });
+    }
 
-//     // Hash the password before storing
-//     string passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
+    // Hash the password before storing
+    string passwordHash = BCrypt.Net.BCrypt.HashPassword(request.Password);
 
 
-//     var user = new User
-//     {
-//         Username = request.Username,
-//         PasswordHash = passwordHash
-//     };
+    var user = new User
+    {
+        Username = request.Username,
+        PasswordHash = passwordHash
+    };
 
-//     db.Users.Add(user);
-//     await db.SaveChangesAsync();
+    db.Users.Add(user);
+    await db.SaveChangesAsync();
 
-//     return Results.Ok(new { message = "User created successfully" });
-// })
-// .WithName("Signup")
-// .WithOpenApi(); // appear in Swagger
+    return Results.Ok(new { message = "User created successfully" });
+})
+.WithName("Signup")
+.WithOpenApi(); // appear in Swagger
 
 app.MapPost("/api/auth/login", async (AppDbContext db, LoginRequest request, ILogger<Program> logger) =>
 {
@@ -590,6 +655,40 @@ app.MapPost("/api/auth/saveFcmToken", async (AppDbContext db, HttpContext http, 
 .WithName("SaveFcmToken")
 .WithOpenApi();
 
+app.MapPost("/api/auth/fcmTest", async (AppDbContext db, HttpContext http, IFcmService fcmService, ILogger<Program> logger, IAuthorizationService AuthService, FcmTestRequest request) =>
+{
+    User user;
+    try
+    {
+        user = await AuthService.CommonAuthCheck(http, db, logger);
+    }
+    catch (UnauthorizedAccessException)
+    {
+        return Results.Unauthorized();
+    }
+
+    if (string.IsNullOrWhiteSpace(user.FCMToken))
+    {
+        return Results.BadRequest(new { message = "No FCM token saved for this user. Save a token via /api/auth/saveFcmToken first." });
+    }
+
+    var songTitle = !string.IsNullOrWhiteSpace(request.SongTitle) ? request.SongTitle : "Tu Hai Kahan (SlowReverb)  AUR  Beatblex Music.mp3";
+    var downloadUrl = !string.IsNullOrWhiteSpace(request.DownloadUrl) ? request.DownloadUrl : "https://drive.google.com/file/d/1qrAC-UJzBHggkpXkC0NchwgxGekSvJhR/view?usp=sharing";
+
+    var messageId = await fcmService.SendDownloadCompletedNotificationAsync(user.FCMToken, songTitle, downloadUrl);
+
+    if (messageId == null)
+    {
+        logger.LogWarning("FCM test notification failed for user: {Username}", user.Username);
+        return Results.Json(new { success = false, message = "Failed to send test notification. Check server logs for details." }, statusCode: 500);
+    }
+
+    logger.LogInformation("FCM test notification sent. MessageId={MessageId} SongTitle={SongTitle} User={Username}", messageId, songTitle, user.Username);
+    return Results.Ok(new { success = true, message = "Test notification sent successfully!", messageId, songTitle, downloadUrl });
+})
+.RequireAuthorization()
+.WithName("FcmTest")
+.WithOpenApi();
 
 
 app.Run();
