@@ -48,29 +48,18 @@ public class FcmService : IFcmService
             var message = new Message
             {
                 Token = deviceToken,
-                Notification = new Notification
-                {
-                    Title = "Download Complete",
-                    Body = data.TryGetValue("songTitle", out var title) ? $"\"{title}\" is ready!" : "Your song is ready to download."
-                },
+                // Data-only: no Notification key — prevents system tray from stealing the message
                 Data = data,
                 Android = new AndroidConfig
                 {
                     Priority = Priority.High,
-                    // optional: set TTL, collapse key, etc.
                     TimeToLive = TimeSpan.FromDays(1)
                 },
                 Apns = new ApnsConfig
                 {
                     Aps = new Aps
                     {
-                        Alert = new ApsAlert
-                        {
-                            Title = "Download Complete",
-                            Body = data.TryGetValue("songTitle", out var iosTitle) ? $"\"{iosTitle}\" is ready!" : "Your song is ready to download."
-                        },
-                        Sound = "default",
-                        ContentAvailable = true
+                        ContentAvailable = true   // background push, no alert
                     }
                 }
             };
@@ -100,8 +89,8 @@ public class FcmService : IFcmService
 
         var data = new Dictionary<string, string>
         {
-            { "type", "DOWNLOAD_COMPLETED" },
-            { "songTitle", songTitle },
+            { "type", "DOWNLOAD_SONG" },
+            { "title", songTitle },
             { "downloadUrl", downloadUrl },
             { "timestamp", DateTime.UtcNow.ToString("O") }
         };

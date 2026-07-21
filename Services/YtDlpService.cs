@@ -14,6 +14,7 @@ namespace YTdownloadBackend.Services
         private readonly string _ytDlpPath;
         private readonly string _downloadsFolder;
         private readonly string _versionFile;
+        private readonly string _cookiesFile;
         private readonly TimeSpan _checkInterval = TimeSpan.FromHours(24);
 
         public YtDlpService()
@@ -27,6 +28,7 @@ namespace YTdownloadBackend.Services
             _ytDlpPath = Path.Combine(Directory.GetCurrentDirectory(), "yt-dlp", ytDlpFileName);
             _downloadsFolder = Path.Combine(Directory.GetCurrentDirectory(), "downloads");
             _versionFile = Path.Combine(Directory.GetCurrentDirectory(), "yt-dlp.lastcheck");
+            _cookiesFile = Path.Combine(Directory.GetCurrentDirectory(), "yt-dlp", "cookies.txt");
 
             Directory.CreateDirectory(_downloadsFolder);
         }
@@ -114,7 +116,8 @@ namespace YTdownloadBackend.Services
         private async Task<(int ExitCode, string StdOut, string StdErr, string? Filename)> RunYtDlpAsync(string videoId, string username)
         {
             string outputTemplate = Path.Combine(_downloadsFolder, username, "%(title)s.%(ext)s");
-            string args = $"--restrict-filenames --extract-audio --audio-format mp3 -o \"{outputTemplate}\" https://www.youtube.com/watch?v={videoId}";
+            string cookiesArg = File.Exists(_cookiesFile) ? $"--cookies \"{_cookiesFile}\" " : "";
+            string args = $"--js-runtimes deno --restrict-filenames {cookiesArg}--extract-audio --audio-format mp3 -o \"{outputTemplate}\" https://www.youtube.com/watch?v={videoId}";
             var result = await RunProcessAsync(_ytDlpPath, args);
             
             // Parse filename from StdOut (assuming yt-dlp outputs something like "[download] Destination: /path/to/file.mp3")
