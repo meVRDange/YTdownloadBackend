@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
+using System.Linq;
 
 namespace YTdownloadBackend.Services
 {
@@ -35,44 +36,50 @@ namespace YTdownloadBackend.Services
 
         private static string FindDeno()
         {
-            // Try common locations
-            var paths = new[]
+            // 1. Try PATH first
+            try
             {
-                "deno", // hope it's on PATH
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    @"Microsoft\WinGet\Packages\DenoLand.Deno_Microsoft.Winget.Source_8wekyb3d8bbwe\deno.exe"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".deno\bin\deno.exe"),
-                @"C:\Program Files\deno\deno.exe"
-            };
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "deno",
+                    Arguments = "--version",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                using var proc = Process.Start(psi);
+                proc?.WaitForExit(3000);
+                if (proc?.ExitCode == 0)
+                    return "deno";
+            }
+            catch { }
 
-            foreach (var path in paths)
+            // 2. Search WinGet packages folder for deno
+            try
             {
-                if (path == "deno")
+                var wingetDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    @"Microsoft\WinGet\Packages");
+                if (Directory.Exists(wingetDir))
                 {
-                    // Check if deno is on PATH
-                    try
+                    var denoDir = Directory.GetDirectories(wingetDir, "DenoLand.Deno_*").FirstOrDefault();
+                    if (denoDir != null)
                     {
-                        var psi = new ProcessStartInfo
-                        {
-                            FileName = "deno",
-                            Arguments = "--version",
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
-                            UseShellExecute = false,
-                            CreateNoWindow = true
-                        };
-                        using var proc = Process.Start(psi);
-                        proc?.WaitForExit(3000);
-                        if (proc?.ExitCode == 0)
-                            return "deno";
+                        var denoExe = Path.Combine(denoDir, "deno.exe");
+                        if (File.Exists(denoExe))
+                            return denoExe;
                     }
-                    catch { }
-                }
-                else if (File.Exists(path))
-                {
-                    return path;
                 }
             }
+            catch { }
+
+            // 3. Try user .deno folder
+            var userDeno = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                @".deno\bin\deno.exe");
+            if (File.Exists(userDeno))
+                return userDeno;
 
             return "deno"; // fallback
         }
